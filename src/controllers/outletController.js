@@ -1,4 +1,5 @@
 const prisma = require('../../lib/prisma');
+const { logOrderStatusChange } = require('../utils/orderAuditLogger');
 const jwt = require('jsonwebtoken');
 const jwtConfig = require('../config/jwtConfig');
 const bcrypt = require('bcrypt');
@@ -560,6 +561,8 @@ const verifyReturnExchangeOtp = async (req, res) => {
                 }
             });
 
+            await logOrderStatusChange(record.order_id, record.order.status || 'delivered', 'approved', req.user);
+
             // Delete the delivery record (remove delivery history for this attempt)
             await prisma.delivery.deleteMany({
                 where: { order_id: record.order_id }
@@ -576,6 +579,8 @@ const verifyReturnExchangeOtp = async (req, res) => {
                     is_delivered: false
                 }
             });
+
+            await logOrderStatusChange(record.order_id, record.order.status || 'delivered', 'Returned', req.user);
         }
 
         // Step 7: Update inventory status

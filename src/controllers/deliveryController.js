@@ -1,4 +1,5 @@
 const prisma = require('../../lib/prisma');
+const { logOrderStatusChange } = require('../utils/orderAuditLogger');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
@@ -247,6 +248,8 @@ const submitDelivery = async (req, res) => {
         is_delivered: true
       }
     });
+
+    await logOrderStatusChange(parseInt(order_id), order.status, 'delivered', req.user);
 
     // Determine advance amount STRICTLY from delivery context (selected_plan)
     let advanceAmount = 0.0;
@@ -1097,6 +1100,8 @@ const returnProduct = async (req, res) => {
       }
     });
 
+    await logOrderStatusChange(parseInt(order_id), order.status, 'returned', req.user);
+
     const io = req.app.get('io');
     await notifyAdmins(
       'Product Returned',
@@ -1161,6 +1166,8 @@ const verifyRefundOtp = async (req, res) => {
       where: { id: parseInt(order_id) },
       data: { status: 'refunded' }
     });
+
+    await logOrderStatusChange(parseInt(order_id), order.status, 'refunded', req.user);
 
     const io = req.app.get('io');
     await notifyAdmins(
@@ -1296,6 +1303,8 @@ const unpickOrder = async (req, res) => {
         postponed_feedback: feedback
       }
     });
+
+    await logOrderStatusChange(parseInt(order_id), 'picked', 'postponed', req.user);
 
     const io = req.app.get('io');
     await notifyAdmins(
@@ -1681,6 +1690,8 @@ const submitSelfPickupDelivery = async (req, res) => {
     });
 
     const { delivery, productNameSnapshot, colorVariant } = result;
+
+    await logOrderStatusChange(parseInt(order_id), order.status, 'delivered', req.user);
 
     // 5. Build Installment Ledger
     let installmentLedger = null;

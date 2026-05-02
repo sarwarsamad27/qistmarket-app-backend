@@ -77,6 +77,7 @@ model User {
   verification_edit_history      VerificationEditHistory[] @relation("user_edits")
   vendor_purchase_edits          VendorPurchaseEditHistory[] @relation("vendor_purchase_edits")
   collected_payments             OrderPayment[]            @relation("PaymentCollector")
+  status_changes                 OrderStatusHistory[]      @relation("UserOrderStatusChanges")
 
   @@index([role_id])
   @@index([is_online])
@@ -150,6 +151,7 @@ model Order {
   recovery_visits          RecoveryVisit[]       @relation("OrderRecoveryVisit")
   return_exchanges         ReturnExchange[]      @relation("OrderReturnExchange")
   smart_pay_qrs            SmartPayQr[]
+  statusHistories          OrderStatusHistory[]  @relation("OrderStatusHistoryLogs")
 
   @@index([created_by_user_id])
   @@index([assigned_to_user_id])
@@ -157,6 +159,23 @@ model Order {
   @@index([recovery_officer_id])
   @@index([outlet_id])
   @@index([imei_serial])
+}
+
+model OrderStatusHistory {
+  id         Int      @id @default(autoincrement())
+  order_id   Int
+  old_status String?
+  new_status String
+  user_id    Int?
+  role_name  String?
+  created_at DateTime @default(now())
+
+  order      Order    @relation("OrderStatusHistoryLogs", fields: [order_id], references: [id], onDelete: Cascade)
+  user       User?    @relation("UserOrderStatusChanges", fields: [user_id], references: [id])
+
+  @@index([order_id])
+  @@index([user_id])
+  @@map("order_status_histories")
 }
 
 model DummyCustomer {

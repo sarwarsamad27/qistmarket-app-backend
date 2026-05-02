@@ -445,6 +445,11 @@ const getUsers = async (req, res) => {
       search = '',
       status = '',
       role = '',
+      full_name = '',
+      username = '',
+      email = '',
+      phone = '',
+      cnic = '',
       sortBy = 'created_at',
       sortDir = 'desc',
     } = req.query;
@@ -466,13 +471,33 @@ const getUsers = async (req, res) => {
       ];
     }
 
-    if (status && ['active', 'inactive'].includes(status.toLowerCase())) {
-      where.status = status.toLowerCase();
+    if (full_name.trim()) {
+      where.full_name = { contains: full_name.trim() };
+    }
+
+    if (username.trim()) {
+      where.username = { contains: username.trim() };
+    }
+
+    if (email.trim()) {
+      where.email = { contains: email.trim() };
+    }
+
+    if (phone.trim()) {
+      where.phone = { contains: phone.trim() };
+    }
+
+    if (cnic.trim()) {
+      where.cnic = { contains: cnic.trim() };
+    }
+
+    if (status.trim()) {
+      where.status = { contains: status.trim() };
     }
 
     if (role.trim()) {
       where.role = {
-        name: { equals: role.trim() },
+        name: { contains: role.trim() },
       };
     }
 

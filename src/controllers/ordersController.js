@@ -1,4 +1,5 @@
 const prisma = require('../../lib/prisma');
+const { logOrderStatusChange } = require('../utils/orderAuditLogger');
 const crypto = require('crypto');
 const axios = require('axios');
 const { notifyUser, notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
@@ -117,6 +118,7 @@ const expireOrders = async (io = null) => {
   });
 
   for (const order of ordersToExpire) {
+    await logOrderStatusChange(order.id, order.status, 'expired', { id: null, role: 'System' });
     const orderData = {
       id: order.id,
       order_ref: order.order_ref,
@@ -386,6 +388,8 @@ const createOrder = async (req, res) => {
       }
     });
 
+    await logOrderStatusChange(order.id, null, order.status, req.user);
+
     const io = req.app.get('io');
     if (assignedOfficerId) {
       await sendOrderAssignmentNotification(order, order.assigned_to, 'verification', io);
@@ -536,6 +540,8 @@ const createOrderFromWebsitePickup = async (req, res) => {
         assigned_to: { select: { id: true, username: true } }
       }
     });
+
+    await logOrderStatusChange(order.id, null, 'pending', req.user);
 
     await logAction(
       req,
@@ -905,6 +911,8 @@ const takeOrder = async (req, res) => {
       },
     });
 
+    await logOrderStatusChange(updatedOrder.id, order.status, 'pending', req.user);
+
     return res.status(200).json({
       success: true,
       message: 'Website order taken successfully',
@@ -1269,6 +1277,12 @@ const getOrderById = async (req, res) => {
           },
           orderBy: { changed_at: 'desc' }
         },
+        statusHistories: {
+          include: {
+            user: { select: { username: true, full_name: true } }
+          },
+          orderBy: { created_at: 'desc' }
+        },
         verification: {
           select: {
             id: true,
@@ -1399,6 +1413,8 @@ const assignOrder = async (req, res) => {
       },
     });
 
+    await logOrderStatusChange(updatedOrder.id, order.status, 'pending', req.user);
+
     const io = req.app.get('io');
     await notifyAdmins(
       'Order Assigned',
@@ -1492,6 +1508,10 @@ const assignBulk = async (req, res) => {
       })
     ]);
 
+    for (const orderId of order_ids) {
+      await logOrderStatusChange(orderId, null, 'pending', req.user);
+    }
+
     // Send notifications for bulk assignment
     const io = req.app.get('io');
     const updatedOrders = await prisma.order.findMany({
@@ -1517,7 +1537,7 @@ const assignBulk = async (req, res) => {
 
 const transferOrder = async (req, res) => {
   const { id } = req.params;
-  const { outlet_id } = req.body;
+  const { outlet_id } = req.body;                               
 
   if (!outlet_id) {
     return res.status(400).json({ success: false, message: 'Outlet ID is required for transfer' });
@@ -1545,16 +1565,11 @@ const transferOrder = async (req, res) => {
       }
     });
 
+    await logOrderStatusChange(updatedOrder.id, order.status, 'pending', req.user);
+
     const io = req.app.get('io');
     await sendOrderTransferNotification(updatedOrder, parseInt(outlet_id), io);
 
-    await logAction(
-      req,
-      'ORDER_TRANSFER',
-      `Order ${order.order_ref} transferred to outlet: ${updatedOrder.outlet?.name || outlet_id}`,
-      order.id,
-      'Order'
-    );
 
     return res.status(200).json({
       success: true,
@@ -1585,6 +1600,10 @@ const transferBulk = async (req, res) => {
       }
     });
 
+    for (const orderId of order_ids) {
+      await logOrderStatusChange(orderId, null, 'pending', req.user);
+    }
+
     const io = req.app.get('io');
     const updatedOrders = await prisma.order.findMany({
       where: { id: { in: order_ids.map(Number) } }
@@ -1592,13 +1611,6 @@ const transferBulk = async (req, res) => {
 
     for (const order of updatedOrders) {
       await sendOrderTransferNotification(order, parseInt(outlet_id), io);
-      await logAction(
-        req,
-        'ORDER_TRANSFER',
-        `Order ${order.order_ref} bulk transferred to outlet: ${outlet_id}`,
-        order.id,
-        'Order'
-      );
     }
 
     return res.status(200).json({
@@ -1777,6 +1789,8 @@ const assignDelivery = async (req, res) => {
         }
       });
 
+      await logOrderStatusChange(updatedOrder.id, order.status, 'approved', req.user);
+
       return res.status(200).json({
         success: true,
         message: 'Delivery officer unassigned successfully',
@@ -1804,6 +1818,8 @@ const assignDelivery = async (req, res) => {
         delivery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true } }
       }
     });
+
+    await logOrderStatusChange(updatedOrder.id, order.status, 'picked', req.user);
 
     const io = req.app.get('io');
     await notifyAdmins(
@@ -1856,6 +1872,9 @@ const assignBulkDelivery = async (req, res) => {
           status: 'approved'
         }
       });
+      for (const orderId of order_ids) {
+        await logOrderStatusChange(orderId, null, 'approved', req.user);
+      }
       return res.status(200).json({
         success: true,
         message: `${order_ids.length} orders unassigned from delivery`
@@ -1880,6 +1899,10 @@ const assignBulkDelivery = async (req, res) => {
         status: 'picked'
       }
     });
+
+    for (const orderId of order_ids) {
+      await logOrderStatusChange(orderId, null, 'picked', req.user);
+    }
 
     // Send notifications for bulk delivery assignment
     const io = req.app.get('io');
@@ -1909,6 +1932,17 @@ const cancelOrder = async (req, res) => {
   const { reason } = req.body;
 
   try {
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(id) },
+      select: { status: true }
+    });
+
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    const oldStatus = order.status;
+
     const updatedOrder = await prisma.order.update({
       where: { id: parseInt(id) },
       data: {
@@ -1917,6 +1951,8 @@ const cancelOrder = async (req, res) => {
         cancelled_reason: reason || 'Cancelled by admin',
       },
     });
+
+    await logOrderStatusChange(updatedOrder.id, oldStatus, 'cancelled', req.user);
 
     await logAction(
       req,
@@ -2270,6 +2306,8 @@ const verifyHandover = async (req, res) => {
         }
       })
     ]);
+
+    await logOrderStatusChange(order.id, order.status, 'picked', req.user);
 
     const io = req.app.get('io');
     await notifyAdmins(

@@ -1,4 +1,5 @@
 const prisma = require('../../lib/prisma');
+const { logOrderStatusChange } = require('../utils/orderAuditLogger');
 const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { sendOrderAssignmentNotification } = require('./ordersController');
 const { getPKTDate } = require("../utils/dateUtils");
@@ -52,6 +53,8 @@ const startVerification = async (req, res) => {
         updated_at: getPKTDate(new Date()),
       }
     });
+
+    await logOrderStatusChange(parseInt(order_id), order.status, 'in_progress', req.user);
 
 
     // Create empty purchaser
@@ -1172,6 +1175,8 @@ const completeVerification = async (req, res) => {
       }
     });
 
+    await logOrderStatusChange(updatedVerification.order_id, 'in_progress', 'completed', req.user);
+
     const io = req.app.get('io');
     await notifyAdmins(
       'Verification Completed',
@@ -1224,7 +1229,13 @@ const getVerificationByOrderId = async (req, res) => {
             house_no: true,
             street: true,
             zone: true,
-            alternate_contact: true
+            alternate_contact: true,
+            statusHistories: {
+              include: {
+                user: { select: { username: true, full_name: true } }
+              },
+              orderBy: { created_at: 'desc' }
+            }
           }
         },
         verification_officer: {
@@ -1398,6 +1409,10 @@ const submitVerificationReview = async (req, res) => {
           }
         })
       );
+    }
+
+    if (orderStatusUpdate) {
+      await logOrderStatusChange(verification.order.id, verification.order.status || 'completed', orderStatusUpdate, req.user);
     }
 
     if (updates.length > 0) {
