@@ -1,33 +1,7 @@
 const path = require('path');
-const cloudinary = require('../config/cloudinaryConfig');
 const fs = require('fs');
 
-const uploadsBaseUrl = `https://qistmarket-software-backend.onrender.com/uploads`;
-
-const uploadToCloudinary = async (filePath) => {
-  try {
-    const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-    const apiKey = process.env.CLOUDINARY_API_KEY;
-    const apiSecret = process.env.CLOUDINARY_API_SECRET;
-
-    if (!cloudName || !apiKey || !apiSecret) {
-      console.log('Skipping Cloudinary upload: Credentials missing in .env');
-      return null;
-    }
-
-    console.log(`Uploading to Cloudinary: ${filePath} ...`);
-    const result = await cloudinary.uploader.upload(filePath, {
-      folder: 'qist-market-uploads',
-      resource_type: 'auto',
-    });
-    console.log('Cloudinary upload successful!');
-    return result.secure_url;
-  } catch (error) {
-    console.error('Cloudinary upload error:', error);
-    return null;
-  }
-};
-
+const uploadsBaseUrl = `https://app.qistmarket.pk/uploads`;
 
 module.exports = async (req, res, next) => {
   try {
@@ -41,12 +15,6 @@ module.exports = async (req, res, next) => {
       // Also fix path separator
       if (req.file.path) {
         req.file.path = req.file.path.replace(/\\/g, '/');
-
-        // Upload to Cloudinary and update URL
-        const cloudinaryUrl = await uploadToCloudinary(req.file.path);
-        if (cloudinaryUrl) {
-          req.file.url = cloudinaryUrl;
-        }
       }
     }
 
@@ -61,12 +29,6 @@ module.exports = async (req, res, next) => {
           // Fix path separator
           if (file.path) {
             file.path = file.path.replace(/\\/g, '/');
-
-            // Upload to Cloudinary and update URL
-            const cloudinaryUrl = await uploadToCloudinary(file.path);
-            if (cloudinaryUrl) {
-              file.url = cloudinaryUrl;
-            }
           }
         }
       }
@@ -85,12 +47,6 @@ module.exports = async (req, res, next) => {
               // Fix path separator
               if (file.path) {
                 file.path = file.path.replace(/\\/g, '/');
-
-                // Upload to Cloudinary and update URL
-                const cloudinaryUrl = await uploadToCloudinary(file.path);
-                if (cloudinaryUrl) {
-                  file.url = cloudinaryUrl;
-                }
               }
             }
           }
@@ -102,12 +58,6 @@ module.exports = async (req, res, next) => {
             // Fix path separator
             if (fileOrArray.path) {
               fileOrArray.path = fileOrArray.path.replace(/\\/g, '/');
-
-              // Upload to Cloudinary and update URL
-              const cloudinaryUrl = await uploadToCloudinary(fileOrArray.path);
-              if (cloudinaryUrl) {
-                fileOrArray.url = cloudinaryUrl;
-              }
             }
           }
         }
