@@ -205,6 +205,18 @@ const sendComplaintResolved = async (phone, { customerName, complaintId, note })
   return sendTemplate(phone, WATI_COMPLAINT_RESOLVED_TEMPLATE, WATI_COMPLAINT_RESOLVED_BROADCAST, parameters);
 };
 
+// ─── Template 7: Generic Order Status Update ─────────────────────────────
+const WATI_ORDER_STATUS_TEMPLATE = process.env.WATI_ORDER_STATUS_TEMPLATE || 'order_status_update';
+const WATI_ORDER_STATUS_BROADCAST = process.env.WATI_ORDER_STATUS_TEMPLATE || 'order_status_update';
+
+const sendOrderStatusNotification = async (phone, { customerName, message }) => {
+  const parameters = [
+    { name: '1', value: customerName || 'Customer' },
+    { name: '2', value: message || 'Your order status has been updated.' },
+  ];
+  return sendTemplate(phone, WATI_ORDER_STATUS_TEMPLATE, WATI_ORDER_STATUS_BROADCAST, parameters);
+};
+
 
 module.exports = {
   sendOTP,
@@ -215,4 +227,5 @@ module.exports = {
   sendNextInstallmentReminder,
   sendComplaintReceived,
   sendComplaintResolved,
+  sendOrderStatusNotification,
 };

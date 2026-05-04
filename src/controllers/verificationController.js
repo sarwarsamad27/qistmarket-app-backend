@@ -1230,6 +1230,15 @@ const getVerificationByOrderId = async (req, res) => {
             street: true,
             zone: true,
             alternate_contact: true,
+            channel: true,
+            created_at: true,
+            delivery_assigned_at: true,
+            recovery_assigned_at: true,
+            verification_assigned_at: true,
+            created_by: { select: { username: true, full_name: true } },
+            assigned_to: { select: { username: true, full_name: true } },
+            delivery_officer: { select: { username: true, full_name: true } },
+            recovery_officer: { select: { username: true, full_name: true } },
             statusHistories: {
               include: {
                 user: { select: { username: true, full_name: true } }

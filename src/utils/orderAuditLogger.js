@@ -1,8 +1,9 @@
 const prisma = require('../../lib/prisma');
 const { getPKTDate } = require("../utils/dateUtils");
+const { sendOrderStatusNotification } = require('../services/watiService');
 
 /**
- * Logs a status change for an order.
+ * Logs a status change for an order and sends a WhatsApp notification via Wati.
  * 
  * @param {number} order_id The ID of the order being changed
  * @param {string|null} old_status The previous status
@@ -23,9 +24,98 @@ async function logOrderStatusChange(order_id, old_status, new_status, user) {
         created_at: getPKTDate(new Date()),
       }
     });
+
+    // ─── Wati Notification Logic ─────────────────────────────────────────────
+    
+    // Fetch order details with necessary relations for the message
+    const freshOrder = await prisma.order.findUnique({
+      where: { id: parseInt(order_id) },
+      select: {
+        whatsapp_number: true,
+        customer_name: true,
+        order_ref: true,
+        cancelled_reason: true,
+        postponed_feedback: true,
+        assigned_to: { select: { full_name: true } },
+        delivery_officer: { select: { full_name: true } },
+        outlet: { select: { name: true } }
+      }
+    });
+
+    if (!freshOrder || !freshOrder.whatsapp_number) return;
+
+    let message = "";
+    const customerName = freshOrder.customer_name;
+    const orderRef = freshOrder.order_ref;
+
+    switch (new_status.toLowerCase()) {
+      case 'new':
+        message = `Aapka order ${orderRef} kamyabi se create ho chuka hai. Hum jald hi isay process karenge. Qist Market muntakhib karne ka shukriya!`;
+        break;
+
+      case 'pending':
+        if (freshOrder.assigned_to) {
+          message = `Aapka order ${orderRef} hamare Verification Officer ${freshOrder.assigned_to.full_name} ko assign kar diya gaya hai. Woh jald hi aapse mazeed maloomat ke liye raabta karenge.`;
+        }
+        break;
+
+      case 'in_progress':
+        if (freshOrder.assigned_to) {
+          message = `Aapke order ${orderRef} ki verification shuru ho chuki hai. Hamare officer ${freshOrder.assigned_to.full_name} aapki maloomat ka jaiza le rahe hain.`;
+        }
+        break;
+
+      case 'transferred':
+        if (freshOrder.outlet) {
+          message = `Aapka order ${orderRef} mazeed processing ke liye hamare ${freshOrder.outlet.name} outlet ko transfer kar diya gaya hai.`;
+        }
+        break;
+
+      case 'picked':
+        if (freshOrder.delivery_officer) {
+          message = `Aapka order ${orderRef} Delivery Officer ${freshOrder.delivery_officer.full_name} ko assign kar diya gaya hai. Aapko aapka product jald mil jayega!`;
+        }
+        break;
+
+      case 'approved':
+        message = `Mubarak ho! Aapka order ${orderRef} approve ho chuka hai. Isay jald hi delivery ke liye assign kar diya jayega.`;
+        break;
+
+      case 'completed':
+        message = `Mubarak ho! Aapke order ${orderRef} ki verification kamyabi se mukammal ho chuki hai. Ab yeh aage ki processing ke liye bhej diya gaya hai.`;
+        break;
+
+      case 'delivered':
+        message = `Aapka order ${orderRef} kamyabi se deliver ho chuka hai. Umeed hai aapko aapki kharidari pasand aayegi! Qist Market ka shukriya.`;
+        break;
+
+      case 'cancelled':
+        message = `Aapka order ${orderRef} cancel kar diya gaya hai. Wajah: ${freshOrder.cancelled_reason || 'N/A'}. Agar aapka koi sawal hai to hamari support team se raabta karein.`;
+        break;
+
+      case 'postponed':
+        message = `Aapka order ${orderRef} postpone kar diya gaya hai. Wajah: ${freshOrder.postponed_feedback || 'N/A'}. Hum isay baad mein process karenge.`;
+        break;
+
+      case 'expired':
+        message = `Aapka order ${orderRef} expire ho chuka hai. Agar aap isay dubara khulwana chahte hain to hamari website visit karein ya support se raabta karein.`;
+        break;
+
+      default:
+        // No message for unknown statuses
+        break;
+    }
+
+    if (message) {
+      // Send notification asynchronously without waiting
+      sendOrderStatusNotification(freshOrder.whatsapp_number, {
+        customerName: `Assalam-o-Alaikum ${customerName}!`,
+        message: message
+      }).catch(err => console.error('[WATI] Notification Error:', err));
+    }
+
   } catch (error) {
-    console.error('Failed to log order status change:', error);
-    // Don't throw so it doesn't break the main flow
+    console.error('Failed to log order status change or send notification:', error);
   }
 }
 

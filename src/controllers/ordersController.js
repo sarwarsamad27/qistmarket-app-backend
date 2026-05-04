@@ -410,13 +410,15 @@ const createOrder = async (req, res) => {
       io
     );
 
-    await logAction(
-      req,
-      'ORDER_CREATION',
-      `New order ${order.order_ref} created for ${order.customer_name} (${order.product_name})`,
-      order.id,
-      'Order'
-    );
+    if (req.user.outlet_id) {
+      await logAction(
+            req,
+            'ORDER_CREATION',
+            `New order ${order.order_ref} created for ${order.customer_name} (${order.product_name})`,
+            order.id,
+            'Order'
+          );
+    }
 
     return res.status(201).json({
       success: true,
@@ -527,7 +529,7 @@ const createOrderFromWebsitePickup = async (req, res) => {
         monthly_amount: parseFloat(monthly_amount),
         months: parseInt(months),
         channel: channel || 'Website',
-        status: 'pending',
+        status: 'new',
         created_at: getPKTDate(new Date()),
         created_by_user_id: req.user.id,
         assigned_to_user_id: null,
@@ -541,15 +543,7 @@ const createOrderFromWebsitePickup = async (req, res) => {
       }
     });
 
-    await logOrderStatusChange(order.id, null, 'pending', req.user);
-
-    await logAction(
-      req,
-      'WEBSITE_ORDER_PICKUP',
-      `Website order ${website_token_number} picked up by ${currentUser.full_name}. Local ref: ${order.order_ref}`,
-      order.id,
-      'Order'
-    );
+    await logOrderStatusChange(order.id, null, 'new', req.user);
 
     return res.status(201).json({
       success: true,
@@ -1269,8 +1263,10 @@ const getOrderById = async (req, res) => {
     const order = await prisma.order.findUnique({
       where: { id: Number(id) },
       include: {
-        created_by: { select: { username: true } },
-        assigned_to: { select: { username: true } },
+        created_by: { select: { username: true, full_name: true } },
+        assigned_to: { select: { username: true, full_name: true } },
+        delivery_officer: { select: { username: true, full_name: true } },
+        recovery_officer: { select: { username: true, full_name: true } },
         productHistories: {
           include: {
             changed_by: { select: { username: true, full_name: true } }
@@ -1413,7 +1409,11 @@ const assignOrder = async (req, res) => {
       },
     });
 
-    await logOrderStatusChange(updatedOrder.id, order.status, 'pending', req.user);
+    if (req.user.outlet_id) {
+      await logOrderStatusChange(updatedOrder.id, 'transferred', 'pending', req.user);
+    } else {
+      await logOrderStatusChange(updatedOrder.id, order.status, 'pending', req.user);
+    }
 
     const io = req.app.get('io');
     await notifyAdmins(
@@ -1508,8 +1508,15 @@ const assignBulk = async (req, res) => {
       })
     ]);
 
-    for (const orderId of order_ids) {
-      await logOrderStatusChange(orderId, null, 'pending', req.user);
+
+     if (req.user.outlet_id) {
+      for (const orderId of order_ids) {
+        await logOrderStatusChange(orderId, "transferred", 'pending', req.user);
+      }
+    } else {
+      for (const orderId of order_ids) {
+        await logOrderStatusChange(orderId, null , 'pending', req.user);
+      }
     }
 
     // Send notifications for bulk assignment
@@ -1556,16 +1563,15 @@ const transferOrder = async (req, res) => {
       where: { id: parseInt(id) },
       data: {
         outlet_id: parseInt(outlet_id),
-        assigned_to_user_id: null, // Unassign when transferring to a new outlet queue
+        assigned_to_user_id: null,
         verification_assigned_at: null,
-        status: 'pending' // Reverted to pending per user request
       },
       include: {
         outlet: { select: { name: true } }
       }
     });
 
-    await logOrderStatusChange(updatedOrder.id, order.status, 'pending', req.user);
+    await logOrderStatusChange(updatedOrder.id, order.status, 'transferred', req.user);
 
     const io = req.app.get('io');
     await sendOrderTransferNotification(updatedOrder, parseInt(outlet_id), io);
@@ -1596,12 +1602,11 @@ const transferBulk = async (req, res) => {
         outlet_id: parseInt(outlet_id),
         assigned_to_user_id: null,
         verification_assigned_at: null,
-        status: 'pending'
       }
     });
 
     for (const orderId of order_ids) {
-      await logOrderStatusChange(orderId, null, 'pending', req.user);
+      await logOrderStatusChange(orderId, 'new', 'transferred', req.user);
     }
 
     const io = req.app.get('io');
