@@ -219,6 +219,7 @@ const sendOrderStatusNotification = async (phone, { customerName, message }) => 
 
 
 module.exports = {
+  sendTemplate,
   sendOTP,
   sendDeliveryConfirmation,
   sendInstallmentLedger,

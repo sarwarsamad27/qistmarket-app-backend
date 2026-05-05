@@ -5,7 +5,7 @@ const axios = require('axios');
 const { notifyUser, notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { getPKTDate } = require("../utils/dateUtils");
 const { logAction } = require('../utils/auditLogger');
-const { sendOTP } = require('../services/watiService');
+const { sendOTP, sendTemplate, sendOrderStatusNotification } = require('../services/watiService');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 
 const admin = require('firebase-admin');
@@ -86,63 +86,122 @@ async function sendOrderTransferNotification(order, outletId, io = null) {
 }
 
 const expireOrders = async (io = null) => {
-  const now = new Date();
-  const pendingExpiry = new Date(now.getTime() - 12 * 60 * 60 * 1000);
-  const inProgressExpiry = new Date(now.getTime() - 48 * 60 * 60 * 1000);
+  const now = getPKTDate();
+  const statuses = ['new', 'transferred', 'pending', 'in_progress', 'completed', 'approved'];
 
-  const pendingOrders = await prisma.order.findMany({
+  // Fetch all orders that might be eligible for expiration
+  const orders = await prisma.order.findMany({
     where: {
-      status: 'pending',
-      updated_at: { lt: pendingExpiry },
+      status: { in: statuses },
     },
-    include: { assigned_to: true },
+    include: {
+      assigned_to: true,
+      statusHistories: {
+        orderBy: { created_at: 'desc' },
+        take: 1,
+      },
+    },
   });
 
-  const inProgressOrders = await prisma.order.findMany({
-    where: {
-      status: 'in_progress',
-      updated_at: { lt: inProgressExpiry },
-    },
-    include: { assigned_to: true },
-  });
+  if (orders.length === 0) {
+    return { expiredCount: 0 };
+  }
 
-  const ordersToExpire = [...pendingOrders, ...inProgressOrders];
+  const ordersToExpire = [];
+
+  for (const order of orders) {
+    // Get the timestamp when the order entered its current status
+    // Fallback to order.created_at if no history is found or if it doesn't match current status
+    const latestHistory = order.statusHistories[0];
+    let effectiveTime = new Date(order.created_at);
+
+    if (latestHistory && latestHistory.new_status.toLowerCase() === order.status.toLowerCase()) {
+      effectiveTime = new Date(latestHistory.created_at);
+    }
+
+    let expirationDurationMs = 0;
+
+    switch (order.status.toLowerCase()) {
+      case 'new':
+        if (!order.outlet_id) {
+          expirationDurationMs = 7 * 24 * 60 * 60 * 1000; // 7 days: Not transferred to outlet
+        } else {
+          expirationDurationMs = 2 * 24 * 60 * 60 * 1000; // 2 days: At outlet but no action
+        }
+        break;
+      case 'transferred':
+        expirationDurationMs = 2 * 24 * 60 * 60 * 1000; // 2 days: Transferred but no action
+        break;
+      case 'pending':
+        expirationDurationMs = 3 * 24 * 60 * 60 * 1000; // 3 days: Assigned to VO but no action
+        break;
+      case 'in_progress':
+        expirationDurationMs = 3 * 24 * 60 * 60 * 1000; // 3 days: Verification started but not complete
+        break;
+      case 'completed':
+      case 'approved':
+        expirationDurationMs = 30 * 24 * 60 * 60 * 1000; // 30 days: Verification done, waiting for delivery
+        break;
+      default:
+        continue;
+    }
+
+    if (now.getTime() - effectiveTime.getTime() > expirationDurationMs) {
+      ordersToExpire.push(order);
+    }
+  }
+
   if (ordersToExpire.length === 0) {
     return { expiredCount: 0 };
   }
 
   const orderIds = ordersToExpire.map((order) => order.id);
+
+  // Bulk update status to expired
   await prisma.order.updateMany({
     where: { id: { in: orderIds } },
     data: { status: 'expired' },
   });
 
   for (const order of ordersToExpire) {
+    // Log the expiration in history
     await logOrderStatusChange(order.id, order.status, 'expired', { id: null, role: 'System' });
+
     const orderData = {
       id: order.id,
       order_ref: order.order_ref,
       previous_status: order.status,
-      updated_at: new Date().toISOString(),
+      updated_at: getPKTDate().toISOString(),
     };
 
+    // Emit Socket.IO events for real-time updates (for list refreshing)
     if (io) {
-      if (order.assigned_to?.id) {
-        io.to(`user_${order.assigned_to.id}`).emit('order_expired', orderData);
+      if (order.assigned_to_user_id) {
+        io.to(`user_${order.assigned_to_user_id}`).emit('order_expired', orderData);
+      }
+      if (order.outlet_id) {
+        io.to(`outlet_${order.outlet_id}`).emit('order_expired', orderData);
       }
       io.to('admins').emit('order_expired', orderData);
     }
 
-    if (order.assigned_to?.id) {
-      await notifyUser(
-        order.assigned_to.id,
-        'Order Expired',
-        `Order ${order.order_ref} has been marked expired due to inactivity.`,
-        'order_expired',
-        order.id,
-        io,
-      );
+    // Send notifications (Database + Toast)
+    const title = 'Order Expired';
+    const message = `Order ${order.order_ref} has been marked expired due to inactivity.`;
+    const type = 'order_expired';
+
+    // 1. Notify the assigned officer
+    if (order.assigned_to_user_id) {
+      await notifyUser(order.assigned_to_user_id, title, message, type, order.id, io);
     }
+
+    // 2. Notify the outlet (Branch Users/Sales Officers)
+    if (order.outlet_id) {
+      await notifyOutlet(order.outlet_id, title, message, type, order.id, io);
+    }
+
+    // 3. Notify all active admins
+    await notifyAdmins(title, message, type, order.id, io);
   }
 
   return { expiredCount: ordersToExpire.length };
@@ -381,10 +440,29 @@ const createOrder = async (req, res) => {
         recovery_assigned_at: recoveryOfficerId ? new Date() : null
       },
       include: {
-        created_by: { select: { username: true } },
-        assigned_to: { select: { id: true, username: true, fcm_token: true } },
-        delivery_officer: { select: { id: true, username: true, fcm_token: true } },
-        recovery_officer: { select: { id: true, username: true, fcm_token: true } }
+        created_by: { select: { id: true, username: true, full_name: true } },
+        assigned_to: { select: { id: true, username: true, full_name: true } },
+        delivery_officer: { select: { id: true, username: true, full_name: true } },
+        recovery_officer: { select: { id: true, username: true, full_name: true } },
+        verification: {
+            include: {
+                purchaser: true,
+                grantors: true,
+                nextOfKin: true,
+                documents: true,
+                verification_locations: {
+                    include: {
+                        photos: true
+                    }
+                }
+            }
+        },
+        statusHistories: {
+            include: {
+                user: { select: { username: true, full_name: true } }
+            },
+            orderBy: { created_at: 'desc' }
+        }
       }
     });
 
@@ -920,127 +998,237 @@ const takeOrder = async (req, res) => {
 
 const getCsrDashboardStats = async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    const { filter = 'today', startDate, endDate } = req.query;
+    const userId = req.user.id;
+    const userRoleId = req.user.role_id;
+    const userRole = (req.user.role || '').toLowerCase();
 
+    // Role detection
+    const isCsr = userRoleId === 8 || userRole.includes('sales') || userRole.includes('csr');
+    const isAdmin = [4, 6, 7, 9].includes(userRoleId);
+    const isOutlet = userRoleId === 5;
+
+    // Date range calculation
     let start, end;
-    if (startDate && endDate) {
-      start = new Date(startDate);
-      start.setHours(0, 0, 0, 0);
-      end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
+    const now = new Date();
+
+    if (filter === 'today') {
+      start = new Date(now); start.setHours(0, 0, 0, 0);
+      end = new Date(now); end.setHours(23, 59, 59, 999);
+    } else if (filter === 'month') {
+      start = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+      end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+    } else if (filter === 'custom' && startDate && endDate) {
+      start = new Date(startDate); start.setHours(0, 0, 0, 0);
+      end = new Date(endDate); end.setHours(23, 59, 59, 999);
     } else {
-      // Default to last 30 days if no dates provided for a better initial chart view
-      end = new Date();
-      start = new Date();
-      start.setDate(start.getDate() - 29);
-      start.setHours(0, 0, 0, 0);
+      start = new Date(now); start.setHours(0, 0, 0, 0);
+      end = new Date(now); end.setHours(23, 59, 59, 999);
     }
 
     const dateFilter = { gte: start, lte: end };
 
-    // Get orders in date range for the trend chart
-    const ordersInRange = await prisma.order.findMany({
-      where: {
-        created_at: dateFilter,
-        status: { not: 'cancelled' }
-      },
-      select: {
-        created_at: true,
-        total_amount: true
-      },
-      orderBy: {
-        created_at: 'asc'
-      }
+    // Base where clause — CSR sees only their own orders
+    const baseWhere = {
+      created_at: dateFilter,
+      ...(isCsr ? { created_by_user_id: userId } : {}),
+    };
+
+    // 1. Status counts
+    const statusGroups = await prisma.order.groupBy({
+      by: ['status'],
+      where: baseWhere,
+      _count: { id: true },
     });
 
-    // Generate salesTrend array (Daily grouping)
-    const salesTrendMap = {};
-    ordersInRange.forEach(order => {
-      // Use YYYY-MM-DD
-      const dateKey = order.created_at.toISOString().split('T')[0];
-      if (!salesTrendMap[dateKey]) {
-        salesTrendMap[dateKey] = 0;
-      }
-      salesTrendMap[dateKey] += order.total_amount;
-    });
-
-    const salesTrend = Object.keys(salesTrendMap).map(key => ({
-      x: key,
-      y: salesTrendMap[key]
-    }));
-
-    const [totalToday, websitePending, repeatCustomerGroups, clearAccountsCount, statusCounts] = await Promise.all([
-      prisma.order.count({
-        where: {
-          created_at: dateFilter,
-        },
-      }),
-      prisma.order.count({
-        where: {
-          channel: { in: ['website', 'Website'] },
-          status: { in: ['new', 'pending'] },
-        },
-      }),
-      prisma.order.groupBy({
-        by: ['whatsapp_number'],
-        where: {
-          created_at: dateFilter,
-          whatsapp_number: { not: '' },
-        },
-        _count: { whatsapp_number: true },
-      }),
-      prisma.order.count({
-        where: {
-          status: { in: ['delivered', 'completed'] },
-        }
-      }),
-      prisma.order.groupBy({
-        by: ['status'],
-        where: {
-          created_at: dateFilter,
-        },
-        _count: { id: true },
-      }),
-    ]);
-
-    const repeatCustomers = repeatCustomerGroups.filter(group => group._count.whatsapp_number > 1).length;
-    const statuses = statusCounts.reduce((acc, item) => {
+    const statusCounts = statusGroups.reduce((acc, item) => {
       acc[item.status] = item._count.id;
       return acc;
     }, {});
 
-    const rangeSalesSum = await prisma.order.aggregate({
-      _sum: { total_amount: true },
-      where: {
-        created_at: dateFilter,
-        status: { not: 'cancelled' },
-      },
+    const totalOrders = Object.values(statusCounts).reduce((a, b) => a + b, 0);
+    const deliveredCount = statusCounts['delivered'] || 0;
+    const completedCount = statusCounts['completed'] || 0;
+    const cancelledCount = statusCounts['cancelled'] || 0;
+    const expiredCount = statusCounts['expired'] || 0;
+    const inProgressCount = statusCounts['in_progress'] || 0;
+
+    // 2. Channel breakdown (with status sub-grouping)
+    const channelGroups = await prisma.order.groupBy({
+      by: ['channel', 'status'],
+      where: baseWhere,
+      _count: { id: true },
     });
 
-    const rangeSales = rangeSalesSum._sum.total_amount || 0;
-    const target = Number(process.env.CSR_SALES_TARGET || 0);
-    const remainingTarget = target > 0 ? Math.max(0, target - rangeSales) : 0;
+    const channelMap = {};
+    channelGroups.forEach(item => {
+      const ch = (item.channel || 'unknown').toLowerCase();
+      if (!channelMap[ch]) channelMap[ch] = { total: 0, delivered: 0, cancelled: 0 };
+      channelMap[ch].total += item._count.id;
+      if (item.status === 'delivered') channelMap[ch].delivered += item._count.id;
+      if (item.status === 'cancelled') channelMap[ch].cancelled += item._count.id;
+    });
+
+    const buildChannelStats = (names) => {
+      const combined = { total: 0, delivered: 0, cancelled: 0 };
+      names.forEach(n => {
+        const data = channelMap[n.toLowerCase()];
+        if (data) {
+          combined.total += data.total;
+          combined.delivered += data.delivered;
+          combined.cancelled += data.cancelled;
+        }
+      });
+      combined.successRate = combined.total > 0 ? Math.round((combined.delivered / combined.total) * 100) : 0;
+      combined.cancelRate = combined.total > 0 ? Math.round((combined.cancelled / combined.total) * 100) : 0;
+      return combined;
+    };
+
+    const channelStats = {
+      referral: buildChannelStats(['referral']),
+      call: buildChannelStats(['call']),
+      whatsapp: buildChannelStats(['whatsapp', 'whats_app', 'whats app']),
+      website: buildChannelStats(['website']),
+    };
+
+    // 3. Target tracking — advance_amount from delivery.selected_plan JSON
+    const deliveredOrdersWithPlan = await prisma.order.findMany({
+      where: { ...baseWhere, status: 'delivered' },
+      select: {
+        id: true,
+        delivery: { select: { selected_plan: true } }
+      }
+    });
+
+    let achievedAmount = 0;
+    deliveredOrdersWithPlan.forEach(order => {
+      if (order.delivery?.selected_plan) {
+        const plan = order.delivery.selected_plan;
+        const advAmt = typeof plan === 'object'
+          ? (Number(plan.advance_amount) || Number(plan.advanceAmount) || Number(plan.downPayment) || 0)
+          : 0;
+        achievedAmount += advAmt;
+      }
+    });
+
+    const achievedCustomers = deliveredOrdersWithPlan.length;
+    const monthlyTarget = Number(process.env.CSR_MONTHLY_TARGET || process.env.CSR_SALES_TARGET || 0);
+    const customerTarget = Number(process.env.CSR_CUSTOMER_TARGET || 0);
+    const remaining = monthlyTarget > 0 ? Math.max(0, monthlyTarget - achievedAmount) : 0;
+
+    // Days remaining in current month for daily avg calc
+    const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+    const daysLeft = Math.max(1, daysInMonth - now.getDate() + 1);
+    const dailyAvgRequired = remaining > 0 ? Math.round(remaining / daysLeft) : 0;
+
+    // 4. Overall success metrics
+    const successRate = totalOrders > 0 ? Math.round((deliveredCount / totalOrders) * 100) : 0;
+    const cancelRate = totalOrders > 0 ? Math.round((cancelledCount / totalOrders) * 100) : 0;
+
+    // 5. CSR Ranking Board (visible to admins and outlet users)
+    let csrRanking = [];
+    if (isAdmin || isOutlet) {
+      const rankingGroups = await prisma.order.groupBy({
+        by: ['created_by_user_id', 'status'],
+        where: {
+          created_at: dateFilter,
+          created_by_user_id: { not: null },
+        },
+        _count: { id: true },
+      });
+
+      const csrUserIds = [...new Set(rankingGroups.map(g => g.created_by_user_id).filter(Boolean))];
+
+      const csrUsers = await prisma.user.findMany({
+        where: { id: { in: csrUserIds } },
+        select: { id: true, full_name: true, username: true },
+      });
+      const userMap = {};
+      csrUsers.forEach(u => { userMap[u.id] = u; });
+
+      const rankingMap = {};
+      rankingGroups.forEach(item => {
+        const uid = item.created_by_user_id;
+        if (!uid) return;
+        if (!rankingMap[uid]) {
+          rankingMap[uid] = {
+            total: 0, delivered: 0, cancelled: 0, achievedAmount: 0,
+            user: userMap[uid] || { id: uid, full_name: 'Unknown', username: '?' }
+          };
+        }
+        rankingMap[uid].total += item._count.id;
+        if (item.status === 'delivered') rankingMap[uid].delivered += item._count.id;
+        if (item.status === 'cancelled') rankingMap[uid].cancelled += item._count.id;
+      });
+
+      // Get advance amounts per CSR from delivered orders
+      const csrDeliveredOrders = await prisma.order.findMany({
+        where: {
+          created_at: dateFilter,
+          status: 'delivered',
+          created_by_user_id: { not: null },
+        },
+        select: {
+          created_by_user_id: true,
+          delivery: { select: { selected_plan: true } }
+        }
+      });
+
+      csrDeliveredOrders.forEach(order => {
+        const uid = order.created_by_user_id;
+        if (uid && rankingMap[uid] && order.delivery?.selected_plan) {
+          const plan = order.delivery.selected_plan;
+          const advAmt = typeof plan === 'object'
+            ? (Number(plan.advance_amount) || Number(plan.advanceAmount) || Number(plan.downPayment) || 0)
+            : 0;
+          rankingMap[uid].achievedAmount += advAmt;
+        }
+      });
+
+      csrRanking = Object.values(rankingMap)
+        .map(entry => ({
+          userId: entry.user.id,
+          name: entry.user.full_name,
+          username: entry.user.username,
+          totalOrders: entry.total,
+          delivered: entry.delivered,
+          cancelled: entry.cancelled,
+          achievedAmount: entry.achievedAmount,
+          successRate: entry.total > 0 ? Math.round((entry.delivered / entry.total) * 100) : 0,
+        }))
+        .sort((a, b) => b.successRate - a.successRate);
+    }
 
     return res.status(200).json({
       success: true,
       data: {
-        totalOrdersRange: totalToday,
-        websiteOrdersPending: websitePending,
-        repeatCustomersRange: repeatCustomers,
-        clearAccountsCount,
+        filter,
+        dateRange: { start: start.toISOString(), end: end.toISOString() },
+        isCsr,
+        totalOrders,
         statusCounts: {
-          new: statuses.new || 0,
-          pending: statuses.pending || 0,
-          in_progress: statuses.in_progress || 0,
-          expired: statuses.expired || 0,
-          picked: statuses.picked || 0,
-          delivered: statuses.delivered || 0,
-          cancelled: statuses.cancelled || 0,
-          approved: statuses.approved || 0,
+          delivered: deliveredCount,
+          completed: completedCount,
+          cancelled: cancelledCount,
+          expired: expiredCount,
+          in_progress: inProgressCount,
+          new: statusCounts['new'] || 0,
+          pending: statusCounts['pending'] || 0,
+          approved: statusCounts['approved'] || 0,
         },
-        rangeSales,
-        remainingTarget,
-        salesTrend
+        channelStats,
+        successRate,
+        cancelRate,
+        targetTracking: {
+          monthlyTarget,
+          achievedAmount,
+          remaining,
+          achievedCustomers,
+          customerTarget,
+          dailyAvgRequired,
+          progressPct: monthlyTarget > 0 ? Math.min(100, Math.round((achievedAmount / monthlyTarget) * 100)) : 0,
+        },
+        csrRanking,
       },
     });
   } catch (error) {
@@ -1048,6 +1236,8 @@ const getCsrDashboardStats = async (req, res) => {
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
+
+
 
 const getExpiredAssignedOrders = async (req, res) => {
   const userRole = (req.user.role || '').toLowerCase();
@@ -1280,11 +1470,7 @@ const getOrderById = async (req, res) => {
           orderBy: { created_at: 'desc' }
         },
         verification: {
-          select: {
-            id: true,
-            status: true,
-            home_location_verified: true,
-            home_location_required: true,
+          include: {
             reviews: {
               include: {
                 reviewer: {
@@ -1296,10 +1482,13 @@ const getOrderById = async (req, res) => {
               },
               orderBy: { created_at: 'desc' }
             },
-            purchaser: {
-              select: {
-                id: true,
-                is_verified: true,
+            purchaser: true,
+            grantors: true,
+            nextOfKin: true,
+            documents: true,
+            verification_locations: {
+              include: {
+                photos: true
               }
             }
           }
@@ -2541,6 +2730,242 @@ const verifySelfPickupOTP = async (req, res) => {
   }
 };
 
+/**
+ * POST /orders/convert/send-otp
+ * Sends OTP to a specific phone number for conversion verification
+ */
+const sendIndividualConvertOTP = async (req, res) => {
+  const { phone, name, type } = req.body;
+
+  if (!phone) {
+    return res.status(400).json({ success: false, message: 'Phone number is required' });
+  }
+
+  try {
+    const otp = await saveOTP(phone, 'convert_sale');
+    
+    if (type === 'grantor' && name) {
+        // Use the specialized grantor template if name is provided
+        const template_name = process.env.WATI_GRANTORS_OTP_TEMPLATE_NAME;
+        const broadcast_name = process.env.WATI_GRANTORS_OTP_BROADCAST_NAME;
+        
+        if (template_name && broadcast_name) {
+            await sendTemplate(phone, template_name, broadcast_name, [
+                { name: '1', value: otp },
+                { name: 'name', value: name }
+            ]);
+        } else {
+            await sendOTP(phone, otp);
+        }
+    } else {
+        await sendOTP(phone, otp);
+    }
+
+    return res.status(200).json({ success: true, message: `OTP sent to ${phone}` });
+  } catch (error) {
+    console.error('sendIndividualConvertOTP error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+/**
+ * POST /orders/convert/verify-otp
+ */
+const verifyConvertSaleOTP = async (req, res) => {
+  const { phone, otp } = req.body;
+
+  if (!phone || !otp) {
+    return res.status(400).json({ success: false, message: 'phone and otp are required' });
+  }
+
+  try {
+    const result = await verifyOTP(phone, otp, 'convert_sale');
+
+    if (!result.valid) {
+      return res.status(400).json({ success: false, message: result.message || 'Invalid OTP' });
+    }
+
+    return res.status(200).json({ success: true, message: 'OTP verified successfully.' });
+  } catch (error) {
+    console.error('verifyConvertSaleOTP error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+/**
+ * POST /orders/convert/create
+ * Creates a fast-tracked order from a cleared account
+ */
+const createConvertedSale = async (req, res) => {
+  const {
+    orderData,
+    purchaserData,
+    grantorsData,
+    otpVerified
+  } = req.body;
+
+  if (!otpVerified) {
+    return res.status(400).json({ success: false, message: 'OTP must be verified first.' });
+  }
+
+  try {
+    const currentUser = await prisma.user.findUnique({ where: { id: req.user.id } });
+    
+    // Generate references
+    const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const randomNum = Math.floor(1000 + Math.random() * 9000);
+    const order_ref = `QIST-${dateStr}-${randomNum}`;
+    const token_number = crypto.randomBytes(4).toString('hex').toUpperCase();
+
+    // The new order starts as 'completed'
+    const status = 'completed';
+
+    const newOrder = await prisma.order.create({
+      data: {
+        order_ref,
+        token_number,
+        customer_name: purchaserData.name || orderData.customer_name,
+        whatsapp_number: purchaserData.telephone_number || orderData.whatsapp_number,
+        alternate_contact: orderData.alternate_contact || null,
+        address: purchaserData.present_address || orderData.address,
+        city: orderData.city || 'Karachi',
+        area: orderData.area || null,
+        zone: orderData.zone || null,
+        block: orderData.block || null,
+        street: orderData.street || null,
+        house_no: orderData.house_no || null,
+        order_notes: 'Repeat Customer Sale',
+        
+        gender: orderData.gender || null,
+        marital_status: orderData.marital_status || null,
+        residential_type: orderData.residential_type || null,
+
+        product_name: orderData.product_name,
+        total_amount: parseFloat(orderData.total_amount),
+        advance_amount: parseFloat(orderData.advance_amount),
+        monthly_amount: parseFloat(orderData.monthly_amount),
+        months: parseInt(orderData.months),
+        channel: orderData.channel || 'Repeat Customer',
+        status: status,
+        created_at: getPKTDate(new Date()),
+        created_by_user_id: req.user.id,
+        outlet_id: orderData.outlet_id || currentUser?.outlet_id || null,
+      }
+    });
+
+    // Fetch old verification to clone documents and locations
+    const { oldOrderId } = req.body;
+    let oldVerification = null;
+    if (oldOrderId) {
+        oldVerification = await prisma.verification.findUnique({
+            where: { order_id: Number(oldOrderId) },
+            include: { documents: true, verification_locations: { include: { photos: true } } }
+        });
+    }
+
+    // Create Verification and nested records
+    const { id: _, verification_id: __, ...cleanPurchaserData } = purchaserData;
+    
+    const verification = await prisma.verification.create({
+      data: {
+        order_id: newOrder.id,
+        verification_officer_id: req.user.id,
+        status: 'completed',
+        start_time: new Date(),
+        end_time: new Date(),
+        verification_feedback: 'Repeat customer converted sale.',
+        purchaser: {
+          create: {
+            ...cleanPurchaserData,
+            is_verified: true
+          }
+        },
+        grantors: {
+          create: grantorsData.map((g, idx) => {
+            const { id: gId, verification_id: gVid, ...cleanG } = g;
+            return {
+              ...cleanG,
+              grantor_number: idx + 1,
+              is_verified: true
+            };
+          })
+        },
+        // Clone documents if they exist
+        documents: oldVerification?.documents ? {
+            create: oldVerification.documents.map(doc => {
+                const { id: dId, verification_id: dVid, uploaded_at: dAt, ...cleanDoc } = doc;
+                return cleanDoc;
+            })
+        } : undefined,
+        // Clone locations if they exist
+        verification_locations: oldVerification?.verification_locations ? {
+            create: oldVerification.verification_locations.map(loc => {
+                const { id: lId, verification_id: lVid, created_at: lAt, photos: lPhotos, ...cleanLoc } = loc;
+                return {
+                    ...cleanLoc,
+                    photos: {
+                        create: lPhotos?.map(p => {
+                            const { id: pId, verification_location_id: pLid, uploaded_at: pAt, ...cleanP } = p;
+                            return cleanP;
+                        })
+                    }
+                };
+            })
+        } : undefined
+      }
+    });
+
+    // Inject status history for all steps
+    const historySteps = [
+      { old: null, new: 'new' },
+      { old: 'new', new: 'pending' },
+      { old: 'pending', new: 'in_progress' },
+      { old: 'in_progress', new: 'completed' }
+    ];
+
+    for (const step of historySteps) {
+      await logOrderStatusChange(newOrder.id, step.old, step.new, req.user, 'Repeat Customer Sale', true);
+    }
+
+    // Send a single custom message for repeat customers
+    if (newOrder.whatsapp_number) {
+        const repeatMsg = `Mohtaram Customer, aapka Repeat Customer order ${newOrder.order_ref} approve hone ke liye bhej diya gaya hai. Qist Market muntakhib karne ka shukriya!`;
+        await sendOrderStatusNotification(newOrder.whatsapp_number, { 
+            customerName: newOrder.customer_name, 
+            message: repeatMsg 
+        });
+    }
+
+    // Emit Socket.IO and send Dashboard Notifications
+    const io = req.app.get('io');
+    if (io) {
+      io.to('admins').emit('new_order', newOrder);
+      if (newOrder.outlet_id) {
+        io.to(`outlet_${newOrder.outlet_id}`).emit('new_order', newOrder);
+      }
+    }
+
+    // Dashboard Notifications
+    const notificationTitle = 'Repeat Customer Sale';
+    const notificationMessage = `New repeat sale ${newOrder.order_ref} created for ${newOrder.customer_name}.`;
+    
+    await notifyAdmins(notificationTitle, notificationMessage, 'order_creation', newOrder.id, io);
+    if (newOrder.outlet_id) {
+        await notifyOutlet(newOrder.outlet_id, notificationTitle, notificationMessage, 'order_creation', newOrder.id, io);
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: 'New sale created successfully from repeat customer.',
+      data: { orderId: newOrder.id, token: newOrder.token_number }
+    });
+
+  } catch (error) {
+    console.error('createConvertedSale error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 module.exports = {
   createOrder,
   getOrders,
@@ -2576,4 +3001,7 @@ module.exports = {
   getSelfPickupInventory,
   sendSelfPickupOTP,
   verifySelfPickupOTP,
+  sendIndividualConvertOTP,
+  verifyConvertSaleOTP,
+  createConvertedSale,
 };

@@ -9,10 +9,42 @@ const { sendOrderStatusNotification } = require('../services/watiService');
  * @param {string|null} old_status The previous status
  * @param {string} new_status The new status
  * @param {object} user The user object making the change (req.user)
+ * @param {string|null} remarks Optional remarks for the audit trail
  */
-async function logOrderStatusChange(order_id, old_status, new_status, user) {
+async function logOrderStatusChange(order_id, old_status, new_status, user, remarks = null, skipNotification = false) {
   try {
-    if (old_status === new_status) return;
+    if (old_status === new_status && !remarks) return;
+
+    // Fetch order details with necessary relations for the message and audit
+    const freshOrder = await prisma.order.findUnique({
+      where: { id: parseInt(order_id) },
+      select: {
+        id: true,
+        whatsapp_number: true,
+        customer_name: true,
+        order_ref: true,
+        cancelled_reason: true,
+        postponed_feedback: true,
+        assigned_to: { select: { full_name: true } },
+        delivery_officer: { select: { full_name: true } },
+        recovery_officer: { select: { full_name: true } },
+        outlet: { select: { name: true } }
+      }
+    });
+
+    if (!freshOrder) return;
+
+    // Auto-generate remarks if not provided
+    let finalRemarks = remarks;
+    if (!finalRemarks) {
+      if (new_status.toLowerCase() === 'transferred' && freshOrder.outlet) {
+        finalRemarks = `Transferred to ${freshOrder.outlet.name}`;
+      } else if (new_status.toLowerCase() === 'pending' && freshOrder.assigned_to) {
+        finalRemarks = `Assigned to ${freshOrder.assigned_to.full_name} for Verification`;
+      } else if (new_status.toLowerCase() === 'picked' && freshOrder.delivery_officer) {
+        finalRemarks = `Assigned to ${freshOrder.delivery_officer.full_name} for Delivery`;
+      }
+    }
 
     await prisma.orderStatusHistory.create({
       data: {
@@ -21,28 +53,14 @@ async function logOrderStatusChange(order_id, old_status, new_status, user) {
         new_status: new_status,
         user_id: user?.id ? parseInt(user.id) : null,
         role_name: user?.role || user?.role_name || null,
+        remarks: finalRemarks,
         created_at: getPKTDate(new Date()),
       }
     });
 
     // ─── Wati Notification Logic ─────────────────────────────────────────────
     
-    // Fetch order details with necessary relations for the message
-    const freshOrder = await prisma.order.findUnique({
-      where: { id: parseInt(order_id) },
-      select: {
-        whatsapp_number: true,
-        customer_name: true,
-        order_ref: true,
-        cancelled_reason: true,
-        postponed_feedback: true,
-        assigned_to: { select: { full_name: true } },
-        delivery_officer: { select: { full_name: true } },
-        outlet: { select: { name: true } }
-      }
-    });
-
-    if (!freshOrder || !freshOrder.whatsapp_number) return;
+    if (skipNotification || !freshOrder.whatsapp_number) return;
 
     let message = "";
     const customerName = freshOrder.customer_name;

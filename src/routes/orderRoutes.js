@@ -32,7 +32,10 @@ const {
   transferBulk,
   getSelfPickupInventory,
   sendSelfPickupOTP,
-  verifySelfPickupOTP
+  verifySelfPickupOTP,
+  sendIndividualConvertOTP,
+  verifyConvertSaleOTP,
+  createConvertedSale,
 } = require('../controllers/ordersController');
 const { submitSelfPickupDelivery } = require('../controllers/deliveryController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
@@ -76,6 +79,11 @@ router.post('/orders/self-pickup/submit', authenticateJWT, upload.fields([{ name
 // Handover Routes
 router.post('/orders/:id/initiate-handover', authenticateJWT, initiateHandover);
 router.post('/orders/:id/verify-handover', authenticateJWT, verifyHandover);
+
+// Convert Cleared Account Routes
+router.post('/orders/convert/send-otp', authenticateJWT, sendIndividualConvertOTP);
+router.post('/orders/convert/verify-otp', authenticateJWT, verifyConvertSaleOTP);
+router.post('/orders/convert/create', authenticateJWT, createConvertedSale);
 
 // Outlet Handover Management
 router.get('/orders/handover/history', authenticateJWT, getHandoverHistory);

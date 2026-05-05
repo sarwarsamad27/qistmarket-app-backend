@@ -168,6 +168,7 @@ model OrderStatusHistory {
   new_status String
   user_id    Int?
   role_name  String?
+  remarks    String?  @db.Text
   created_at DateTime @default(now())
 
   order      Order    @relation("OrderStatusHistoryLogs", fields: [order_id], references: [id], onDelete: Cascade)
