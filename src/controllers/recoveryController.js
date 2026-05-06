@@ -210,7 +210,7 @@ const getRecoveryCustomers = async (req, res) => {
           take: 1,
         },
       },
-      orderBy: [{ customer_name: 'asc' }, { created_at: 'desc' }],
+      orderBy: [{ customer_name: 'asc' }, { created_at: 'asc' }],
     });
 
     if (orders.length === 0) {

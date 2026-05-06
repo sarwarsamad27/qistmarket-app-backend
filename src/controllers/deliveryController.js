@@ -526,7 +526,7 @@ const getPendingDeliveryProducts = async (req, res) => {
         months: true,
       },
       orderBy: {
-        updated_at: 'desc',
+        updated_at: 'asc',
       },
     });
 
@@ -659,7 +659,7 @@ const getCashInHand = async (req, res) => {
           orderBy: { submission_date: 'desc' }
         }
       },
-      orderBy: { created_at: 'desc' }
+      orderBy: { created_at: 'asc' }
     });
 
     // === TRANSACTION HISTORY (Bank Statement Style) ===

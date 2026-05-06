@@ -711,7 +711,7 @@ const getWebsiteOrderFeed = async (req, res) => {
 };
 
 const getOrders = async (req, res) => {
-  const { page = 1, limit = 10, search = '', sortBy = 'created_at', sortDir = 'desc', ...filters } = req.query;
+  const { page = 1, limit = 10, search = '', sortBy = 'created_at', sortDir = 'asc', ...filters } = req.query;
 
   const skip = (Number(page) - 1) * Number(limit);
   const take = Number(limit);
@@ -896,13 +896,13 @@ const getOrdersWithPagination = async (req, res) => {
 
     const where = { ...baseWhere };
     if (cursorId > 0) {
-      where.id = { lt: cursorId };
+      where.id = { gt: cursorId };
     }
 
     const orders = await prisma.order.findMany({
       where,
       take,
-      orderBy: { id: 'desc' },
+      orderBy: { id: 'asc' },
       include: {
         created_by: { select: { username: true } },
         assigned_to: { select: { username: true } },
@@ -1260,7 +1260,7 @@ const getExpiredAssignedOrders = async (req, res) => {
     const total = await prisma.order.count({ where });
     const orders = await prisma.order.findMany({
       where,
-      orderBy: { updated_at: 'desc' },
+      orderBy: { updated_at: 'asc' },
       skip,
       take: limit,
     });
@@ -1325,13 +1325,13 @@ const getMyDeliveryOrdersWithPagination = async (req, res) => {
 
     const where = { ...baseWhere };
     if (cursorId > 0) {
-      where.id = { lt: cursorId };
+      where.id = { gt: cursorId };
     }
 
     const orders = await prisma.order.findMany({
       where,
       take,
-      orderBy: { id: 'desc' },
+      orderBy: { id: 'asc' },
       include: {
         created_by: {
           select: {
@@ -1841,7 +1841,7 @@ const getVerificationOrders = async (req, res) => {
         where,
         skip,
         take,
-        orderBy: { created_at: 'desc' },
+        orderBy: { created_at: 'asc' },
         include: {
           created_by: { select: { username: true, full_name: true } },
           assigned_to: { select: { username: true, full_name: true } },
@@ -1912,7 +1912,7 @@ const getApprovedOrders = async (req, res) => {
         where,
         skip,
         take,
-        orderBy: { updated_at: 'desc' },
+        orderBy: { updated_at: 'asc' },
         include: {
           verification: {
             include: {
@@ -2293,7 +2293,7 @@ const getDeliveredOrders = async (req, res) => {
       where,
       skip,
       take,
-      orderBy: { updated_at: 'desc' },
+      orderBy: { updated_at: 'asc' },
       include: {
         created_by: { select: { username: true } },
         delivery_officer: { select: { username: true, full_name: true } },
@@ -2301,7 +2301,8 @@ const getDeliveredOrders = async (req, res) => {
       },
     });
 
-    const total = await prisma.order.count({ where: { status: 'delivered' } });
+    const total = await prisma.order.count({ where });
+    const totalPages = Math.ceil(total / take);
 
     return res.status(200).json({
       success: true,
@@ -2310,7 +2311,7 @@ const getDeliveredOrders = async (req, res) => {
         pagination: {
           page: Number(page),
           total,
-          totalPages: Math.ceil(total / take),
+          totalPages,
         },
       },
     });
@@ -2570,7 +2571,7 @@ const getOfficerApprovedOrders = async (req, res) => {
         status: 'approved',
         outlet_id: req.user.outlet_id
       },
-      orderBy: { created_at: 'desc' }
+      orderBy: { created_at: 'asc' }
     });
 
     return res.status(200).json({ success: true, data: orders });
@@ -2893,7 +2894,7 @@ const createConvertedSale = async (req, res) => {
         // Clone documents if they exist
         documents: oldVerification?.documents ? {
             create: oldVerification.documents.map(doc => {
-                const { id: dId, verification_id: dVid, uploaded_at: dAt, ...cleanDoc } = doc;
+                const { id: dId,  verification_id: dVid, uploaded_at: dAt, ...cleanDoc } = doc;
                 return cleanDoc;
             })
         } : undefined,

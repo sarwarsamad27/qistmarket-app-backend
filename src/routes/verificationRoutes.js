@@ -33,7 +33,8 @@ const {
   sendToDOForLocation,
   updateLocationVerified,
   getDeliveredProductDetails,
-  getDeliveredProductsList
+  getDeliveredProductsList,
+  updateVerificationMedia
 } = require('../controllers/verificationController');
 
 // Get all verifications
@@ -139,7 +140,17 @@ router.post(
   upload.array('photos', 5),
   fixUploadPath,
   updateLocationVerified
-)
+);
+
+// NEW: Update verification media
+router.put(
+  '/verification/:verification_id/media',
+  authenticateJWT,
+  upload.single('file'),
+  fixUploadPath,
+  updateVerificationMedia
+);
+
 
 router.get('/delivered-product/order/:order_id', authenticateJWT, getDeliveredProductDetails);
 

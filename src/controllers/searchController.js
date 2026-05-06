@@ -20,6 +20,12 @@ const globalSearch = async (req, res) => {
                             { whatsapp_number: { contains: query } },
                             { imei_serial: { contains: query } },
                             { address: { contains: query } },
+                            // Search in Purchaser Verification details
+                            { verification: { purchaser: { name: { contains: query } } } },
+                            { verification: { purchaser: { cnic_number: { contains: query } } } },
+                            { verification: { purchaser: { telephone_number: { contains: query } } } },
+                            // Search in Delivery details
+                            { delivery: { product_imei: { contains: query } } },
                         ]
                     }
                 ]
@@ -32,6 +38,7 @@ const globalSearch = async (req, res) => {
                         documents: true
                     }
                 },
+                delivery: true,
                 installment_ledger: true
             },
             take: 15
@@ -52,6 +59,7 @@ const globalSearch = async (req, res) => {
                         order: {
                             include: {
                                 installment_ledger: true,
+                                delivery: true,
                                 verification: { include: { purchaser: true, grantors: true, documents: true } }
                             }
                         }
@@ -75,6 +83,7 @@ const globalSearch = async (req, res) => {
                         order: {
                             include: {
                                 installment_ledger: true,
+                                delivery: true,
                                 verification: { include: { purchaser: true, grantors: true, documents: true } }
                             }
                         }
@@ -114,7 +123,7 @@ const globalSearch = async (req, res) => {
                 whatsapp_number: purchaser?.telephone_number || order.whatsapp_number,
                 status: order.status,
                 product_name: order.product_name,
-                imei_serial: order.imei_serial,
+                imei_serial: order.delivery?.product_imei || order.imei_serial,
                 address: purchaser?.present_address || order.address,
                 ledger_short_id: order.installment_ledger?.short_id || null,
                 // Minimal verification data for profile view

@@ -1094,6 +1094,18 @@ const deleteDocument = async (req, res) => {
       });
     }
 
+    // Record Edit History
+    await recordEditHistory(
+      document.verification_id,
+      document.person_type,
+      document.person_id,
+      document.document_type,
+      document.file_url,
+      'DELETED',
+      req.user.id,
+      req.user.full_name
+    );
+
     // Delete document
     await prisma.verificationDocument.delete({
       where: { id: parseInt(document_id) }
@@ -1471,7 +1483,7 @@ const submitVerificationReview = async (req, res) => {
 };
 
 const getVerifications = async (req, res) => {
-  const { page = 1, limit = 10, search = '', sortBy = 'created_at', sortDir = 'desc', ...filters } = req.query;
+  const { page = 1, limit = 10, search = '', sortBy = 'created_at', sortDir = 'asc', ...filters } = req.query;
 
   const skip = (Number(page) - 1) * Number(limit);
   const take = Number(limit);
@@ -1577,13 +1589,13 @@ const getMyAssignedOrdersCursorPaginated = (targetStatus) => async (req, res) =>
 
     const where = { ...baseWhere };
     if (cursorId > 0) {
-      where.id = { lt: cursorId };
+      where.id = { gt: cursorId };
     }
 
     const orders = await prisma.order.findMany({
       where,
       take,
-      orderBy: { id: 'desc' },
+      orderBy: { id: 'asc' },
       include: {
         created_by: { select: { username: true, full_name: true } },
         assigned_to: { select: { username: true, full_name: true } },
@@ -2433,7 +2445,7 @@ const getDeliveredProductsList = async (req, res) => {
       where,
       skip,
       take,
-      orderBy: { updated_at: 'desc' },
+      orderBy: { updated_at: 'asc' },
       include: {
         delivery: {
           include: {
@@ -2503,6 +2515,125 @@ const getDeliveredProductsList = async (req, res) => {
   }
 };
 
+// Update Verification Media (Single document/photo update)
+const updateVerificationMedia = async (req, res) => {
+  const { verification_id } = req.params;
+  const { document_type, person_type, person_id, label, document_id } = req.body;
+
+  if (!req.file) {
+    return res.status(400).json({ success: false, error: 'No file uploaded' });
+  }
+
+  try {
+    const verification = await prisma.verification.findUnique({
+      where: { id: parseInt(verification_id) },
+      include: { purchaser: true, grantors: true }
+    });
+
+    if (!verification) {
+      return res.status(404).json({ success: false, error: 'Verification not found' });
+    }
+
+    let old_value = null;
+    let entity_id = null;
+
+    // 1. Identify Entity
+    if (person_type === 'purchaser') {
+      if (!verification.purchaser) {
+        return res.status(404).json({ success: false, error: 'Purchaser record not found' });
+      }
+      entity_id = verification.purchaser.id;
+    } else if (person_type.startsWith('grantor')) {
+      const grantorId = person_id ? parseInt(person_id) : null;
+      const grantor = verification.grantors.find(g => 
+        (grantorId && g.id === grantorId) || 
+        (!grantorId && person_type === `grantor${g.grantor_number}`)
+      );
+      
+      if (!grantor) {
+        return res.status(404).json({ success: false, error: 'Grantor record not found' });
+      }
+      entity_id = grantor.id;
+    }
+
+    // 2. Identify old value and update/create document
+    let document;
+    if (document_id) {
+      const existingDoc = await prisma.verificationDocument.findUnique({
+        where: { id: parseInt(document_id) }
+      });
+      if (existingDoc) {
+        old_value = existingDoc.file_url;
+        document = await prisma.verificationDocument.update({
+          where: { id: existingDoc.id },
+          data: {
+            file_url: req.file.url,
+            uploaded_at: getPKTDate(new Date())
+          }
+        });
+      }
+    } else {
+      document = await prisma.verificationDocument.create({
+        data: {
+          verification_id: parseInt(verification_id),
+          document_type,
+          person_type,
+          person_id: entity_id,
+          file_url: req.file.url,
+          label: label || `${document_type}`,
+          uploaded_at: getPKTDate(new Date())
+        }
+      });
+    }
+
+    // 3. Update the primary URL in Purchaser/Grantor table (syncing)
+    let primaryField = document_type;
+    const suffixTypes = ['cnic_front', 'cnic_back', 'utility_bill', 'service_card', 'signature', 'office_card'];
+    if (suffixTypes.includes(document_type)) {
+      primaryField = `${document_type}_url`;
+    }
+
+    try {
+      if (person_type === 'purchaser') {
+        await prisma.purchaserVerification.update({
+          where: { id: entity_id },
+          data: { [primaryField]: req.file.url }
+        });
+      } else if (entity_id) {
+        await prisma.grantorVerification.update({
+          where: { id: entity_id },
+          data: { [primaryField]: req.file.url }
+        });
+      }
+    } catch (updateError) {
+      console.warn(`Optional primary field update failed for ${primaryField}:`, updateError.message);
+    }
+
+    // 4. Record Edit History
+    await recordEditHistory(
+      parseInt(verification_id),
+      person_type,
+      entity_id,
+      document_type,
+      old_value,
+      req.file.url,
+      req.user.id,
+      req.user.full_name
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Media updated and replaced successfully',
+      data: { document }
+    });
+
+  } catch (error) {
+    console.error('Update verification media error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+};
+
+
 module.exports = {
   getVerifications,
   startVerification,
@@ -2532,5 +2663,6 @@ module.exports = {
   sendToDOForLocation,
   updateLocationVerified,
   getDeliveredProductDetails,
-  getDeliveredProductsList
+  getDeliveredProductsList,
+  updateVerificationMedia
 };

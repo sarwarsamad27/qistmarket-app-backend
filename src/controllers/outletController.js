@@ -281,7 +281,7 @@ const getGlobalCashInHand = async (req, res) => {
                 officer: { select: { full_name: true, phone: true } },
                 outlet: { select: { name: true } }
             },
-            orderBy: { created_at: 'desc' }
+            orderBy: { created_at: 'asc' }
         });
 
         // Hide product/customer details and calculate balance
@@ -981,7 +981,7 @@ const getOutletInstallments = async (req, res) => {
                     }
                 }
             },
-            orderBy: { created_at: 'desc' },
+            orderBy: { created_at: 'asc' },
             skip,
             take: limitNum,
         });
