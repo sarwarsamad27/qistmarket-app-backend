@@ -162,7 +162,7 @@ const getDashboardStats = async (req, res) => {
         const deliveryPending = outletOrders.filter(o => o.status === 'picked').length;
         const delivered = outletOrders.filter(o => o.status === 'delivered').length;
         const cancelledOrders = outletOrders.filter(o => o.status === 'cancelled').length;
-        const expiredOrders = outletOrders.filter(o => o.status === 'cancelled').length;
+        const expiredOrders = outletOrders.filter(o => o.status === 'expired').length;
 
         // Performance: Calculate sales from Installment Ledger payments (Advance + Installment collections)
         const outletLedgers = await prisma.installmentLedger.findMany({
@@ -281,7 +281,7 @@ const getGlobalCashInHand = async (req, res) => {
                 officer: { select: { full_name: true, phone: true } },
                 outlet: { select: { name: true } }
             },
-            orderBy: { created_at: 'asc' }
+            orderBy: { created_at: 'desc' }
         });
 
         // Hide product/customer details and calculate balance
@@ -981,7 +981,7 @@ const getOutletInstallments = async (req, res) => {
                     }
                 }
             },
-            orderBy: { created_at: 'asc' },
+            orderBy: { created_at: 'desc' },
             skip,
             take: limitNum,
         });

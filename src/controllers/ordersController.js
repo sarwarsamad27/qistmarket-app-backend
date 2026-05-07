@@ -85,6 +85,23 @@ async function sendOrderTransferNotification(order, outletId, io = null) {
   }
 }
 
+/**
+ * Counts the number of Sundays between two dates
+ */
+function countSundaysBetween(start, end) {
+  let count = 0;
+  let current = new Date(start);
+  // Iterate through each day to find Sundays
+  while (current <= end) {
+    if (current.getDay() === 0) { // 0 is Sunday
+      count++;
+    }
+    current.setDate(current.getDate() + 1);
+  }
+  return count;
+}
+
+
 const expireOrders = async (io = null) => {
   const now = getPKTDate();
   const statuses = ['new', 'transferred', 'pending', 'in_progress', 'completed', 'approved'];
@@ -93,6 +110,7 @@ const expireOrders = async (io = null) => {
   const orders = await prisma.order.findMany({
     where: {
       status: { in: statuses },
+      cancelled_at: null,
     },
     include: {
       assigned_to: true,
@@ -110,6 +128,8 @@ const expireOrders = async (io = null) => {
   const ordersToExpire = [];
 
   for (const order of orders) {
+    if (order.status.toLowerCase() === 'cancelled') continue;
+
     // Get the timestamp when the order entered its current status
     // Fallback to order.created_at if no history is found or if it doesn't match current status
     const latestHistory = order.statusHistories[0];
@@ -146,7 +166,11 @@ const expireOrders = async (io = null) => {
         continue;
     }
 
-    if (now.getTime() - effectiveTime.getTime() > expirationDurationMs) {
+    const sundaysCount = countSundaysBetween(effectiveTime, now);
+    const additionalMs = sundaysCount * 24 * 60 * 60 * 1000;
+    const totalAllowedMs = expirationDurationMs + additionalMs;
+
+    if (now.getTime() - effectiveTime.getTime() > totalAllowedMs) {
       ordersToExpire.push(order);
     }
   }
@@ -711,7 +735,7 @@ const getWebsiteOrderFeed = async (req, res) => {
 };
 
 const getOrders = async (req, res) => {
-  const { page = 1, limit = 10, search = '', sortBy = 'created_at', sortDir = 'asc', ...filters } = req.query;
+  const { page = 1, limit = 10, search = '', sortBy = 'updated_at', sortDir = 'desc', ...filters } = req.query;
 
   const skip = (Number(page) - 1) * Number(limit);
   const take = Number(limit);
@@ -1260,7 +1284,7 @@ const getExpiredAssignedOrders = async (req, res) => {
     const total = await prisma.order.count({ where });
     const orders = await prisma.order.findMany({
       where,
-      orderBy: { updated_at: 'asc' },
+      orderBy: { updated_at: 'desc' },
       skip,
       take: limit,
     });
@@ -1818,7 +1842,7 @@ const transferBulk = async (req, res) => {
 };
 
 const getVerificationOrders = async (req, res) => {
-  const { page = 1, limit = 10, search = '', sortBy = 'created_at', sortDir = 'desc', ...filters } = req.query;
+  const { page = 1, limit = 10, search = '', sortBy = 'updated_at', sortDir = 'desc', ...filters } = req.query;
 
   const skip = (Number(page) - 1) * Number(limit);
   const take = Number(limit);
@@ -1841,7 +1865,7 @@ const getVerificationOrders = async (req, res) => {
         where,
         skip,
         take,
-        orderBy: { created_at: 'asc' },
+        orderBy: { created_at: 'desc' },
         include: {
           created_by: { select: { username: true, full_name: true } },
           assigned_to: { select: { username: true, full_name: true } },
@@ -1912,7 +1936,7 @@ const getApprovedOrders = async (req, res) => {
         where,
         skip,
         take,
-        orderBy: { updated_at: 'asc' },
+        orderBy: { updated_at: 'desc' },
         include: {
           verification: {
             include: {
@@ -2240,26 +2264,32 @@ const updateOrderItem = async (req, res) => {
 
 const getDeliveryStatus = async (req, res) => {
   try {
-    const counts = await prisma.order.groupBy({
-      by: ['status'],
-      _count: { id: true },
-    });
+    const userFromDb = await prisma.user.findUnique({ where: { id: req.user.id } });
+    const userRole = (req.user?.role || '').toLowerCase();
 
-    const stats = {
-      pending: 0,
-      approved: 0,
-      picked: 0,
-      delivered: 0,
-      cancelled: 0,
+    const where = {
+      status: { in: ['picked', 'in_progress'] },
     };
 
-    counts.forEach((c) => {
-      if (stats.hasOwnProperty(c.status)) {
-        stats[c.status] = c._count.id;
+    if (userRole === 'branch user') {
+      where.outlet_id = userFromDb?.outlet_id || -1;
+    }
+
+    const orders = await prisma.order.findMany({
+      where,
+      take: 10,
+      orderBy: { updated_at: 'desc' },
+      select: {
+        id: true,
+        order_ref: true,
+        customer_name: true,
+        address: true,
+        status: true,
+        updated_at: true,
       }
     });
 
-    return res.status(200).json({ success: true, data: stats });
+    return res.status(200).json({ success: true, data: orders });
   } catch (error) {
     console.error('Get delivery status error:', error);
     return res.status(500).json({ success: false, message: 'Internal server error' });
@@ -2293,7 +2323,7 @@ const getDeliveredOrders = async (req, res) => {
       where,
       skip,
       take,
-      orderBy: { updated_at: 'asc' },
+      orderBy: { updated_at: 'desc' },
       include: {
         created_by: { select: { username: true } },
         delivery_officer: { select: { username: true, full_name: true } },
@@ -2571,7 +2601,7 @@ const getOfficerApprovedOrders = async (req, res) => {
         status: 'approved',
         outlet_id: req.user.outlet_id
       },
-      orderBy: { created_at: 'asc' }
+      orderBy: { created_at: 'desc' }
     });
 
     return res.status(200).json({ success: true, data: orders });

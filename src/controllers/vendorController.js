@@ -689,12 +689,12 @@ const getVendorLedger = async (req, res) => {
         const purchases = await prisma.vendorPurchase.findMany({
             where: { vendor_id: vendor.id },
             include: { items: true },
-            orderBy: { purchase_date: 'asc' }
+            orderBy: { purchase_date: 'desc' }
         });
 
         const payments = await prisma.vendorPayment.findMany({
             where: { vendor_id: vendor.id },
-            orderBy: { created_at: 'asc' }
+            orderBy: { created_at: 'desc' }
         });
 
         // Merge and Sort

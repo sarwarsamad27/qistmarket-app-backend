@@ -526,7 +526,7 @@ const getPendingDeliveryProducts = async (req, res) => {
         months: true,
       },
       orderBy: {
-        updated_at: 'asc',
+        updated_at: 'desc',
       },
     });
 
@@ -659,7 +659,7 @@ const getCashInHand = async (req, res) => {
           orderBy: { submission_date: 'desc' }
         }
       },
-      orderBy: { created_at: 'asc' }
+      orderBy: { created_at: 'desc' }
     });
 
     // === TRANSACTION HISTORY (Bank Statement Style) ===
@@ -761,7 +761,7 @@ const submitCashToOutlet = async (req, res) => {
 
     const availableEntries = await prisma.cashInHand.findMany({
       where: queryArgs,
-      orderBy: { created_at: 'asc' }, // Oldest first for FIFO
+      orderBy: { created_at: 'desc' }, // Latest first for LIFO
       include: {
         officer: { select: { id: true, full_name: true, phone: true, fcm_token: true } },
         order: { select: { product_name: true, order_ref: true } }
