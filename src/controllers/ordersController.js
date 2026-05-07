@@ -2285,11 +2285,20 @@ const getDeliveryStatus = async (req, res) => {
         customer_name: true,
         address: true,
         status: true,
+        total_amount: true,
         updated_at: true,
+        delivery_officer: {
+          select: { full_name: true, username: true }
+        }
       }
     });
 
-    return res.status(200).json({ success: true, data: orders });
+    const formatted = orders.map(o => ({
+      ...o,
+      amount: o.total_amount
+    }));
+
+    return res.status(200).json({ success: true, data: formatted });
   } catch (error) {
     console.error('Get delivery status error:', error);
     return res.status(500).json({ success: false, message: 'Internal server error' });
