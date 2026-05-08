@@ -1483,7 +1483,7 @@ const submitVerificationReview = async (req, res) => {
 };
 
 const getVerifications = async (req, res) => {
-  const { page = 1, limit = 10, search = '', sortBy = 'created_at', sortDir = 'asc', ...filters } = req.query;
+  const { page = 1, limit = 10, search = '', sortBy = 'created_at', sortDir = 'desc', ...filters } = req.query;
 
   const skip = (Number(page) - 1) * Number(limit);
   const take = Number(limit);

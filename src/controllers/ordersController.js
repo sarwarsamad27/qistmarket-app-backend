@@ -926,7 +926,7 @@ const getOrdersWithPagination = async (req, res) => {
     const orders = await prisma.order.findMany({
       where,
       take,
-      orderBy: { id: 'asc' },
+      orderBy: { id: 'desc' },
       include: {
         created_by: { select: { username: true } },
         assigned_to: { select: { username: true } },
@@ -1355,7 +1355,7 @@ const getMyDeliveryOrdersWithPagination = async (req, res) => {
     const orders = await prisma.order.findMany({
       where,
       take,
-      orderBy: { id: 'asc' },
+      orderBy: { id: 'desc' },
       include: {
         created_by: {
           select: {
