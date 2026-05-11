@@ -19,7 +19,8 @@ const {
   unpickOrder,
   submitCashToOutlet,
   initiateReturnExchange,
-  getDeliveryOfficerOTPLogs
+  getDeliveryOfficerOTPLogs,
+  replaceDeliveryUpload
 } = require('../controllers/deliveryController');
 
 // Delivery Officer Analytics
@@ -66,5 +67,14 @@ router.post('/delivery-boy/initiate-return', authenticateJWT, initiateReturnExch
 
 // Analytics & Reporting for Delivery Officer
 router.get('/delivery-boy/analytics', authenticateJWT, getDeliveryOfficerAnalytics);
+
+// Replace delivery upload photo (Super Admin only)
+router.put(
+  '/delivery/upload/:upload_id/replace',
+  authenticateJWT,
+  upload.single('file'),
+  fixUploadPath,
+  replaceDeliveryUpload
+);
 
 module.exports = router;

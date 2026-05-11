@@ -98,18 +98,16 @@ async function syncBlacklistStatus() {
  * Checks if a name or CNIC is blacklisted.
  * Searches both PurchaserVerification and GrantorVerification.
  */
-async function checkBlacklistStatus(name, cnic) {
+async function checkBlacklistStatus(cnic) {
     if (!cnic) return { isBlacklisted: false };
 
     const cleanCnic = cnic.trim();
-    const cleanName = name ? name.trim() : null;
 
     // Check PurchaserVerification
     const blacklistedPurchaser = await prisma.purchaserVerification.findFirst({
         where: {
             OR: [
                 { cnic_number: cleanCnic },
-                ...(cleanName ? [{ name: { contains: cleanName } }] : [])
             ],
             is_blacklisted: true
         }
@@ -122,7 +120,6 @@ async function checkBlacklistStatus(name, cnic) {
         where: {
             OR: [
                 { cnic_number: cleanCnic },
-                ...(cleanName ? [{ name: { contains: cleanName } }] : [])
             ],
             is_blacklisted: true
         }

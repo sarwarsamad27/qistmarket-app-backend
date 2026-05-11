@@ -1833,6 +1833,70 @@ const submitSelfPickupDelivery = async (req, res) => {
   }
 };
 
+// Replace a delivery upload photo (Super Admin only)
+const replaceDeliveryUpload = async (req, res) => {
+  const { upload_id } = req.params;
+
+  if (!req.file) {
+    return res.status(400).json({ success: false, error: 'No file uploaded' });
+  }
+
+  try {
+    const existing = await prisma.deliveryUpload.findUnique({
+      where: { id: parseInt(upload_id) }
+    });
+
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Upload not found' });
+    }
+
+    const updated = await prisma.deliveryUpload.update({
+      where: { id: parseInt(upload_id) },
+      data: {
+        file_url: req.file.url,
+        uploaded_at: getPKTDate(new Date())
+      },
+      include: {
+        delivery: {
+          include: {
+            order: {
+              include: {
+                verification: true
+              }
+            }
+          }
+        }
+      }
+    });
+
+    // Log to edit history (if verification exists)
+    if (updated.delivery.order.verification) {
+      await prisma.verificationEditHistory.create({
+        data: {
+          verification_id: updated.delivery.order.verification.id,
+          entity_type: 'delivery_upload',
+          entity_id: updated.id,
+          field_name: 'file_url',
+          old_value: existing.file_url,
+          new_value: updated.file_url,
+          edited_by_id: req.user.id,
+          edited_by_name: req.user.full_name,
+          edited_at: getPKTDate(new Date())
+        }
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Delivery upload replaced successfully',
+      data: { upload: updated }
+    });
+  } catch (error) {
+    console.error('Replace delivery upload error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+};
+
 module.exports = {
   submitDelivery,
   getDeliveryByOrderId,
@@ -1849,5 +1913,6 @@ module.exports = {
   submitCashToOutlet,
   initiateReturnExchange,
   getDeliveryOfficerOTPLogs,
-  submitSelfPickupDelivery
+  submitSelfPickupDelivery,
+  replaceDeliveryUpload
 };

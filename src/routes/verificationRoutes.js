@@ -34,7 +34,8 @@ const {
   updateLocationVerified,
   getDeliveredProductDetails,
   getDeliveredProductsList,
-  updateVerificationMedia
+  updateVerificationMedia,
+  replaceLocationPhoto
 } = require('../controllers/verificationController');
 
 // Get all verifications
@@ -156,5 +157,14 @@ router.get('/delivered-product/order/:order_id', authenticateJWT, getDeliveredPr
 
 // Get list of all delivered products (with pagination and search)
 router.get('/delivered-products', authenticateJWT, getDeliveredProductsList);
+
+// Replace verification location photo (Super Admin only)
+router.put(
+  '/location-photo/:photo_id/replace',
+  authenticateJWT,
+  upload.single('file'),
+  fixUploadPath,
+  replaceLocationPhoto
+);
 
 module.exports = router;

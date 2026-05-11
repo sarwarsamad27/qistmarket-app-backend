@@ -12,7 +12,8 @@ const {
     generateInstallmentOtp,
     submitInstallment,
     logRecoveryVisit,
-    getOrderRecoveryVisits
+    getOrderRecoveryVisits,
+    replaceRecoveryVisitPhoto
 } = require('../controllers/recoveryController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
@@ -53,5 +54,13 @@ router.post(
 // recoveryRoutes.js - Add this route
 router.get('/order/:order_id/visits', authenticateJWT, getOrderRecoveryVisits);
 
-module.exports = router;
+// Replace recovery visit photo (Super Admin only)
+router.put(
+  '/visit-photo/:photo_id/replace',
+  authenticateJWT,
+  upload.single('file'),
+  fixUploadPath,
+  replaceRecoveryVisitPhoto
+);
 
+module.exports = router;

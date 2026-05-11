@@ -798,6 +798,70 @@ const getOrderRecoveryVisits = async (req, res) => {
   }
 };
 
+// Replace a recovery visit photo (Super Admin only)
+const replaceRecoveryVisitPhoto = async (req, res) => {
+  const { photo_id } = req.params;
+
+  if (!req.file) {
+    return res.status(400).json({ success: false, error: 'No file uploaded' });
+  }
+
+  try {
+    const existing = await prisma.recoveryVisitPhoto.findUnique({
+      where: { id: parseInt(photo_id) }
+    });
+
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Photo not found' });
+    }
+
+    const updated = await prisma.recoveryVisitPhoto.update({
+      where: { id: parseInt(photo_id) },
+      data: {
+        file_url: req.file.url,
+        uploaded_at: getPKTDate(new Date())
+      },
+      include: {
+        recovery_visit: {
+          include: {
+            order: {
+              include: {
+                verification: true
+              }
+            }
+          }
+        }
+      }
+    });
+
+    // Log to edit history (if verification exists)
+    if (updated.recovery_visit.order.verification) {
+      await prisma.verificationEditHistory.create({
+        data: {
+          verification_id: updated.recovery_visit.order.verification.id,
+          entity_type: 'recovery_visit_photo',
+          entity_id: updated.id,
+          field_name: 'file_url',
+          old_value: existing.file_url,
+          new_value: updated.file_url,
+          edited_by_id: req.user.id,
+          edited_by_name: req.user.full_name,
+          edited_at: getPKTDate(new Date())
+        }
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Recovery visit photo replaced successfully',
+      data: { photo: updated }
+    });
+  } catch (error) {
+    console.error('Replace recovery visit photo error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+};
+
 module.exports = {
   getAllRecoveryOfficers,
   getRecoveryOfficerStats,
@@ -808,5 +872,6 @@ module.exports = {
   generateInstallmentOtp,
   submitInstallment,
   logRecoveryVisit,
-  getOrderRecoveryVisits
+  getOrderRecoveryVisits,
+  replaceRecoveryVisitPhoto
 };

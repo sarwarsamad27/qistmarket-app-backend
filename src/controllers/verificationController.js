@@ -247,7 +247,7 @@ const savePurchaserVerification = async (req, res) => {
 
   try {
     // Check if blacklisted
-    const blacklistCheck = await checkBlacklistStatus(name, cnic_number);
+    const blacklistCheck = await checkBlacklistStatus(cnic_number);
     if (blacklistCheck.isBlacklisted) {
       return res.status(400).json({
         success: false,
@@ -459,7 +459,7 @@ const saveGrantorVerification = async (req, res) => {
 
   try {
     // Check if blacklisted
-    const blacklistCheck = await checkBlacklistStatus(name, cnic_number);
+    const blacklistCheck = await checkBlacklistStatus(cnic_number);
     if (blacklistCheck.isBlacklisted) {
       return res.status(400).json({
         success: false,
@@ -2634,6 +2634,65 @@ const updateVerificationMedia = async (req, res) => {
 };
 
 
+
+// Replace a verification location photo (Super Admin only)
+const replaceLocationPhoto = async (req, res) => {
+  const { photo_id } = req.params;
+
+  if (!req.file) {
+    return res.status(400).json({ success: false, error: 'No file uploaded' });
+  }
+
+  try {
+    const existing = await prisma.verificationLocationPhoto.findUnique({
+      where: { id: parseInt(photo_id) }
+    });
+
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Photo not found' });
+    }
+
+    const updated = await prisma.verificationLocationPhoto.update({
+      where: { id: parseInt(photo_id) },
+      data: {
+        file_url: req.file.url,
+        uploaded_at: getPKTDate(new Date())
+      },
+      include: {
+        verification_location: {
+          include: {
+            verification: true
+          }
+        }
+      }
+    });
+
+    // Log to edit history
+    await prisma.verificationEditHistory.create({
+      data: {
+        verification_id: updated.verification_location.verification_id,
+        entity_type: 'location_photo',
+        entity_id: updated.id,
+        field_name: 'file_url',
+        old_value: existing.file_url,
+        new_value: updated.file_url,
+        edited_by_id: req.user.id,
+        edited_by_name: req.user.full_name,
+        edited_at: getPKTDate(new Date())
+      }
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Location photo replaced successfully',
+      data: { photo: updated }
+    });
+  } catch (error) {
+    console.error('Replace location photo error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+};
+
 module.exports = {
   getVerifications,
   startVerification,
@@ -2664,5 +2723,6 @@ module.exports = {
   updateLocationVerified,
   getDeliveredProductDetails,
   getDeliveredProductsList,
-  updateVerificationMedia
+  updateVerificationMedia,
+  replaceLocationPhoto
 };
