@@ -7,7 +7,7 @@ const { sendOTP, sendDeliveryConfirmation, sendInstallmentLedger } = require('..
 const { notifyUser, notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const admin = require('firebase-admin');
-const { getPKTDate } = require("../utils/dateUtils");
+const { getPKTDate, formatPKTDate } = require("../utils/dateUtils");
 
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -644,18 +644,13 @@ const getCashInHand = async (req, res) => {
             advance_amount: true,
             created_at: true,
             customer_name: true,
-            delivery: {
-              select: {
-                selected_plan: true,
-                product_imei: true
-              }
-            }
           }
         },
         outlet: {
           select: { name: true, code: true }
         },
         submission_history: {
+          where: { status: 'paid' },
           orderBy: { submission_date: 'desc' }
         }
       },
@@ -665,50 +660,85 @@ const getCashInHand = async (req, res) => {
     // === TRANSACTION HISTORY (Bank Statement Style) ===
     let transactionHistory = [];
 
-    // 1. CREDIT ENTRIES (Cash In Hand - jab paise aaye)
+    // 1. CREDIT ENTRIES (Cash In Hand - jab paise officer ke paas aaye)
     cashEntries.forEach(entry => {
-      const submittedAmt = entry.submitted_amount || 0;
-      const pendingBalance = entry.amount - submittedAmt;
-      
-      // Credit entry - jab initially cash aaya
       transactionHistory.push({
         id: `credit_${entry.id}`,
         type: 'credit',
         amount: entry.amount,
-        balance: entry.amount,
+        balance: entry.amount, // Balance at the time of credit is just the amount
         status: entry.status,
-        description: `Cash received`,
-        transaction_date: entry.created_at,
-        payment_method: entry.payment_method
+        description: `${entry.cash_type || 'Cash'} received from ${entry.customer_name || 'Customer'}`,
+        transaction_date: formatPKTDate(entry.created_at),
+        payment_method: entry.payment_method,
+        order_ref: entry.order?.order_ref || 'N/A'
       });
       
-      // Agar kuch submit ho chuka hai toh debit entry banao
-      if (submittedAmt > 0) {
-        transactionHistory.push({
-          id: `debit_${entry.id}_${Date.now()}`,
-          type: 'debit',
-          amount: submittedAmt,
-          balance: entry.amount - submittedAmt,
-          status: 'submitted',
-          description: `Amount submitted`,
-          transaction_date: entry.submission_history[0]?.submission_date || entry.created_at,
-          payment_method: entry.payment_method
+      // 2. DEBIT ENTRIES (Submissions - jab officer ne outlet ko pay kiya)
+      if (entry.submission_history && entry.submission_history.length > 0) {
+        entry.submission_history.forEach(sub => {
+          // If sub has a submission_ref, we'll group it later. 
+          // For now, we still push it to a collection that we will aggregate.
+          transactionHistory.push({
+            id: `debit_${sub.id}`,
+            type: 'debit',
+            amount: sub.amount_submitted,
+            status: 'paid',
+            description: `Cash submitted to outlet`,
+            transaction_date: formatPKTDate(sub.submission_date),
+            payment_method: entry.payment_method,
+            order_ref: entry.order?.order_ref || 'N/A',
+            submission_ref: sub.submission_ref // Added for grouping
+          });
         });
       }
     });
 
-    // Sort by transaction date (latest first)
-    transactionHistory.sort((a, b) => new Date(b.transaction_date) - new Date(a.transaction_date));
+    // === GROUP DEBITS BY SUBMISSION_REF ===
+    const groupedHistory = [];
+    const debitsByRef = {};
 
-    // Calculate totals
-    const totalCredits = transactionHistory
-      .filter(t => t.type === 'credit')
-      .reduce((sum, t) => sum + t.amount, 0);
-    
-    const totalDebits = transactionHistory
-      .filter(t => t.type === 'debit')
-      .reduce((sum, t) => sum + t.amount, 0);
-    
+    transactionHistory.forEach(item => {
+      if (item.type === 'credit') {
+        groupedHistory.push(item);
+      } else {
+        // It's a debit. Group by submission_ref if exists, else keep separate (fallback for old data)
+        const ref = item.submission_ref || `individual_${item.id}`;
+        if (!debitsByRef[ref]) {
+          debitsByRef[ref] = {
+            ...item,
+            amount: 0,
+            order_refs: new Set()
+          };
+          groupedHistory.push(debitsByRef[ref]);
+        }
+        debitsByRef[ref].amount += item.amount;
+        if (item.order_ref && item.order_ref !== 'N/A') {
+          debitsByRef[ref].order_refs.add(item.order_ref);
+        }
+      }
+    });
+
+    // Cleanup: convert Set to string and set the final description
+    groupedHistory.forEach(item => {
+      if (item.type === 'debit') {
+        const refsArray = Array.from(item.order_refs || []);
+        if (refsArray.length > 1) {
+          item.description = `Combined submission for ${refsArray.length} orders`;
+          item.order_ref = refsArray.join(', ');
+        } else if (refsArray.length === 1) {
+          item.order_ref = refsArray[0];
+        }
+        delete item.order_refs;
+      }
+    });
+
+    // Sort by transaction date (latest first)
+    groupedHistory.sort((a, b) => new Date(b.transaction_date).getTime() - new Date(a.transaction_date).getTime());
+
+    // Calculate totals and running balance correctly
+    const totalCredits = cashEntries.reduce((sum, e) => sum + e.amount, 0);
+    const totalDebits = cashEntries.reduce((sum, e) => sum + (e.submitted_amount || 0), 0);
     const currentBalance = totalCredits - totalDebits;
 
     const totalUnpaid = cashEntries
@@ -717,7 +747,7 @@ const getCashInHand = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      transaction_history: transactionHistory,
+      transaction_history: groupedHistory,
       current_balance: currentBalance,
       total_credits: totalCredits,
       total_debits: totalDebits,
@@ -791,11 +821,11 @@ const submitCashToOutlet = async (req, res) => {
     }
 
     const otp = Math.floor(1000 + Math.random() * 9000).toString();
+    const submissionRef = `SUB-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
     // 2. Distribute the `amountToSubmit` across `availableEntries` (FIFO logic)
     let remainingToSubmit = amountToSubmit;
     const historyCreations = [];
-    const entriesToReport = [];
 
     for (const entry of availableEntries) {
       if (remainingToSubmit <= 0) break;
@@ -808,17 +838,8 @@ const submitCashToOutlet = async (req, res) => {
         amount_submitted: drawAmount,
         status: 'pending',
         otp: otp,
+        submission_ref: submissionRef, // Group them
         outlet_id: parseInt(outlet_id)
-      });
-
-      entriesToReport.push({
-        customer_name: entry.customer_name,
-        order_ref: entry.order?.order_ref || 'N/A',
-        product_name: entry.product_name,
-        imei: entry.imei_serial,
-        color: entry.color_variant,
-        amount: drawAmount, // Amount drawn from this entry
-        cash_type: entry.cash_type || 'Advance amount payment'
       });
 
       remainingToSubmit -= drawAmount;
@@ -864,8 +885,7 @@ const submitCashToOutlet = async (req, res) => {
         officer_name: officerName,
         amount: amountToSubmit,
         payment_method: payment_method || 'Cash',
-        otp: otp,
-        entries: entriesToReport
+        otp: otp
       });
 
       // Save notification to DB for Outlet Users
@@ -1241,7 +1261,7 @@ const getDeliveryBoyInventory = async (req, res) => {
         transferred_at: t.created_at,
         quantity_transferred: qty,
         imei_serial: t.inventory.imei_serial || null,
-        status: t.inventory.status,
+        status: 'In Stock',
         outlet: outlet ? { name: outlet.name, code: outlet.code } : null
       });
     }

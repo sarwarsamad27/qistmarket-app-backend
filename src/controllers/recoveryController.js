@@ -345,13 +345,16 @@ const getCollectionStats = async (req, res) => {
   const officerId = req.user.id;
 
   try {
-    const cashInHand = await prisma.cashInHand.aggregate({
+    const cashEntries = await prisma.cashInHand.findMany({
       where: {
         officer_id: officerId,
         status: 'pending',
-      },
-      _sum: { amount: true },
+      }
     });
+
+    const totalCashInHand = cashEntries.reduce((sum, entry) => {
+      return sum + (entry.amount - (entry.submitted_amount || 0));
+    }, 0);
 
     const recentCollections = await prisma.cashInHand.findMany({
       where: { officer_id: officerId },
@@ -363,7 +366,7 @@ const getCollectionStats = async (req, res) => {
     return res.json({
       success: true,
       data: {
-        cashInHand: cashInHand._sum.amount || 0,
+        cashInHand: totalCashInHand,
         recentCollections: recentCollections.map(c => ({
           ...c,
           customer_name: c.customer_name,
@@ -422,27 +425,21 @@ const submitCollections = async (req, res) => {
   const officerId = req.user.id;
 
   try {
-    const unsubmitted = await prisma.cashInHand.count({
+    const pendingEntries = await prisma.cashInHand.findMany({
       where: {
         officer_id: officerId,
         status: 'pending',
       }
     });
 
-    const unsubmittedAgg = await prisma.cashInHand.aggregate({
-      where: {
-        officer_id: officerId,
-        status: 'pending',
-      },
-      _sum: { amount: true }
-    });
-
-    const totalAmount = unsubmittedAgg._sum.amount || 0;
+    const totalAmount = pendingEntries.reduce((sum, entry) => {
+      return sum + (entry.amount - (entry.submitted_amount || 0));
+    }, 0);
 
     return res.json({
       success: true,
       data: {
-        count: unsubmitted,
+        count: pendingEntries.length,
         totalAmount,
         message: 'Pending collections ready for outlet submission'
       }

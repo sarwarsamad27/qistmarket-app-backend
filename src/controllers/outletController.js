@@ -162,6 +162,7 @@ const getDashboardStats = async (req, res) => {
         const deliveryPending = outletOrders.filter(o => o.status === 'picked').length;
         const delivered = outletOrders.filter(o => o.status === 'delivered').length;
         const cancelledOrders = outletOrders.filter(o => o.status === 'cancelled').length;
+        const rejectedOrders = outletOrders.filter(o => o.status === 'rejected').length;
         const expiredOrders = outletOrders.filter(o => o.status === 'expired').length;
 
         // Performance: Calculate sales from Installment Ledger payments (Advance + Installment collections)
@@ -241,6 +242,7 @@ const getDashboardStats = async (req, res) => {
                     deliveryPending,
                     delivered,
                     cancelledOrders,
+                    rejectedOrders,
                     expiredOrders
                 },
                 performance: {
@@ -401,7 +403,7 @@ const getOutletCashHistory = async (req, res) => {
             }
         }
 
-        const [total, totalSum, histories] = await Promise.all([
+        const [totalCount, totalSum, histories] = await Promise.all([
             prisma.cashSubmissionHistory.count({ where }),
             prisma.cashSubmissionHistory.aggregate({
                 where,
@@ -423,26 +425,54 @@ const getOutletCashHistory = async (req, res) => {
             })
         ]);
 
-        const formattedEntries = histories.map(h => ({
-            id: h.id,
-            amount: h.amount_submitted,
-            status: h.status,
-            created_at: h.submission_date,
-            cash_type: h.cash_in_hand.cash_type || 'Advance amount payment',
-            payment_method: h.cash_in_hand.payment_method,
-            officer: h.cash_in_hand.officer,
-            order: h.cash_in_hand.order
-        }));
+        // Group by submission_ref
+        const groupedMap = {};
+        const formattedEntries = [];
+
+        histories.forEach(h => {
+            const ref = h.submission_ref || `indiv_${h.id}`;
+            if (!groupedMap[ref]) {
+                groupedMap[ref] = {
+                    id: h.id,
+                    submission_ref: h.submission_ref,
+                    amount: 0,
+                    status: h.status,
+                    created_at: h.submission_date,
+                    cash_type: h.cash_in_hand.cash_type || 'Advance amount payment',
+                    payment_method: h.cash_in_hand.payment_method,
+                    officer: h.cash_in_hand.officer,
+                    orders: []
+                };
+                formattedEntries.push(groupedMap[ref]);
+            }
+            groupedMap[ref].amount += h.amount_submitted;
+            if (h.cash_in_hand.order?.order_ref) {
+                groupedMap[ref].orders.push(h.cash_in_hand.order.order_ref);
+            }
+        });
+
+        // Final formatting of order strings
+        formattedEntries.forEach(entry => {
+            if (entry.orders.length > 1) {
+                entry.order_ref = `${entry.orders.length} Orders Combined`;
+                entry.order_refs = entry.orders.join(', ');
+            } else if (entry.orders.length === 1) {
+                entry.order_ref = entry.orders[0];
+            } else {
+                entry.order_ref = 'N/A';
+            }
+            delete entry.orders;
+        });
 
         return res.status(200).json({
             success: true,
             data: formattedEntries,
             totalAmount: totalSum._sum.amount_submitted || 0,
             pagination: {
-                total,
+                total: totalCount,
                 page: pageCount,
                 limit: take,
-                pages: Math.ceil(total / take)
+                pages: Math.ceil(totalCount / take)
             }
         });
     } catch (error) {

@@ -147,4 +147,174 @@ const globalSearch = async (req, res) => {
     }
 };
 
-module.exports = { globalSearch };
+const checkCNICOrders = async (req, res) => {
+    const { cnics } = req.body; // Expecting an array of CNICs
+
+    if (!cnics || !Array.isArray(cnics) || cnics.length === 0) {
+        return res.status(400).json({ success: false, message: 'CNICs array is required' });
+    }
+
+    try {
+        const results = {};
+
+        for (const cnic of cnics) {
+            if (!cnic) continue;
+
+            // Search for purchaser matches
+            const purchaserMatches = await prisma.purchaserVerification.findMany({
+                where: { cnic_number: cnic },
+                include: {
+                    verification: {
+                        include: {
+                            order: {
+                                select: {
+                                    id: true,
+                                    order_ref: true,
+                                    status: true,
+                                    created_at: true
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Search for grantor matches
+            const grantorMatches = await prisma.grantorVerification.findMany({
+                where: { cnic_number: cnic },
+                include: {
+                    verification: {
+                        include: {
+                            order: {
+                                select: {
+                                    id: true,
+                                    order_ref: true,
+                                    status: true,
+                                    created_at: true
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            const orders = new Map();
+
+            purchaserMatches.forEach(pm => {
+                if (pm.verification?.order) {
+                    orders.set(pm.verification.order.id, {
+                        ...pm.verification.order,
+                        role: 'Purchaser'
+                    });
+                }
+            });
+
+            grantorMatches.forEach(gm => {
+                if (gm.verification?.order) {
+                    orders.set(gm.verification.order.id, {
+                        ...gm.verification.order,
+                        role: `Guarantor ${gm.grantor_number || ''}`.trim()
+                    });
+                }
+            });
+
+            results[cnic] = Array.from(orders.values());
+        }
+
+        res.json({ success: true, results });
+    } catch (error) {
+        console.error('Check CNIC Orders Error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const checkPhoneOrders = async (req, res) => {
+    const { phone } = req.body;
+
+    if (!phone) {
+        return res.status(400).json({ success: false, message: 'Phone number is required' });
+    }
+
+    try {
+        // Search in Orders (whatsapp_number)
+        const directOrders = await prisma.order.findMany({
+            where: { whatsapp_number: phone },
+            select: {
+                id: true,
+                order_ref: true,
+                status: true,
+                created_at: true,
+                customer_name: true
+            }
+        });
+
+        // Search in Purchaser Verifications
+        const purchaserMatches = await prisma.purchaserVerification.findMany({
+            where: { telephone_number: phone },
+            include: {
+                verification: {
+                    include: {
+                        order: {
+                            select: {
+                                id: true,
+                                order_ref: true,
+                                status: true,
+                                created_at: true,
+                                customer_name: true
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // Search in Grantor Verifications
+        const grantorMatches = await prisma.grantorVerification.findMany({
+            where: { telephone_number: phone },
+            include: {
+                verification: {
+                    include: {
+                        order: {
+                            select: {
+                                id: true,
+                                order_ref: true,
+                                status: true,
+                                created_at: true,
+                                customer_name: true
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        const ordersMap = new Map();
+
+        directOrders.forEach(o => {
+            ordersMap.set(o.id, { ...o, role: 'Order Contact' });
+        });
+
+        purchaserMatches.forEach(pm => {
+            if (pm.verification?.order) {
+                const o = pm.verification.order;
+                ordersMap.set(o.id, { ...o, role: 'Purchaser' });
+            }
+        });
+
+        grantorMatches.forEach(gm => {
+            if (gm.verification?.order) {
+                const o = gm.verification.order;
+                ordersMap.set(o.id, { ...o, role: `Guarantor ${gm.grantor_number || ''}`.trim() });
+            }
+        });
+
+        const results = Array.from(ordersMap.values());
+
+        res.json({ success: true, results });
+    } catch (error) {
+        console.error('Check Phone Orders Error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+module.exports = { globalSearch, checkCNICOrders, checkPhoneOrders };

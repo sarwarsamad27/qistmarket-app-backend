@@ -144,6 +144,7 @@ const getCustomers = async (req, res) => {
             city: order.city,
             area: order.area,
             profile_photo: profilePhoto,
+            created_at: order.created_at,
           },
           orders: [],
           ledgerSummary: {
@@ -349,6 +350,7 @@ const getBlacklistedCustomers = async (req, res) => {
             area: order.area,
             profile_photo: profilePhoto,
             is_blacklisted: true, // Marker for UI
+            created_at: order.created_at,
           },
           orders: [],
           ledgerSummary: {
@@ -519,6 +521,7 @@ const getClearedCustomers = async (req, res) => {
             area: order.area,
             profile_photo: profilePhoto,
             is_cleared: true,
+            created_at: order.created_at,
           },
           orders: [],
           ledgerSummary: {

@@ -772,11 +772,13 @@ model CashSubmissionHistory {
   submission_date  DateTime   @default(now())
   status           String     @default("pending")
   otp              String?
+  submission_ref   String?    // Added to group split submissions
   outlet_id        Int?
   cash_in_hand     CashInHand @relation(fields: [cash_in_hand_id], references: [id], onDelete: Cascade)
 
   @@index([cash_in_hand_id])
   @@index([otp])
+  @@index([submission_ref])
   @@index([outlet_id])
   @@map("cash_submission_history")
 }

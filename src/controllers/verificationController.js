@@ -2329,24 +2329,26 @@ const getDeliveredProductDetails = async (req, res) => {
         };
       }
 
-    // Extract advance payment details
-    const advancePayment = order.cash_in_hand?.[0] ? {
-      amount: order.cash_in_hand[0].amount,
-      payment_method: order.cash_in_hand[0].payment_method,
-      status: order.cash_in_hand[0].status,
-      created_at: order.cash_in_hand[0].created_at,
-      imei_serial: order.cash_in_hand[0].imei_serial,
-      product_name: order.cash_in_hand[0].product_name,
-      color_variant: order.cash_in_hand[0].color_variant
-    } : null;
-
-    // Extract installment ledger details
+    // Extract advance payment details and installment ledger details
+    let advancePayment = null;
     let installmentDetails = null;
     const ledger = order.installment_ledger || order.delivery?.installment_ledger;
     
     if (ledger?.ledger_rows) {
       const normalized = getNormalizedLedger(ledger.ledger_rows);
       
+      // Derive advance payment from ledger
+      if (normalized.advance_payment) {
+        advancePayment = {
+          amount: normalized.advance_payment.amount,
+          paid_amount: normalized.advance_payment.paid ? normalized.advance_payment.amount : 0,
+          status: normalized.advance_payment.status,
+          paid_at: normalized.advance_payment.paidAt,
+          payment_method: normalized.advance_payment.paymentMethod,
+          label: normalized.advance_payment.label || 'Advance Payment'
+        };
+      }
+
       installmentDetails = {
         token: ledger.short_id || ledger.token,
         advance_payment: normalized.advance_payment,

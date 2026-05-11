@@ -341,10 +341,9 @@ const createOrder = async (req, res) => {
     const existingOrders = await prisma.order.findMany({
       where: {
         OR: [
-          { whatsapp_number: whatsapp_number.trim() },
+          { whatsapp_number: whatsapp_number.trim() }
         ],
         created_at: { gte: today, lt: tomorrow },
-        status: { notIn: ['cancelled', 'delivered'] }
       },
       select: { id: true, whatsapp_number: true, status: true }
     });
@@ -366,8 +365,7 @@ const createOrder = async (req, res) => {
 
     const activeOrderCount = await prisma.order.count({
       where: {
-        whatsapp_number: whatsapp_number.trim(),
-        status: { notIn: ['cancelled', 'delivered'] }
+        whatsapp_number: whatsapp_number.trim()
       }
     });
 
