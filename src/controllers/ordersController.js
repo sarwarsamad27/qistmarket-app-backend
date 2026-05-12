@@ -565,6 +565,95 @@ const createOrder = async (req, res) => {
   }
 };
 
+const cancelWebsiteOrderFeedItem = async (req, res) => {
+  const { id } = req.params; // Source order ID
+  const { reason, orderData } = req.body;
+  const WEBSITE_CANCEL_URL = `https://api.qistmarket.pk/api/orders/${id}/status`;
+
+  if (!reason) {
+    return res.status(400).json({ success: false, message: 'Reason is required for cancellation.' });
+  }
+
+  try {
+    // 1. Notify Website Backend
+    try {
+      await axios.put(WEBSITE_CANCEL_URL, 
+        { status: 'Cancelled', rejectionReason: reason }, 
+        {
+          headers: { 
+            'Content-Type': 'application/json',
+            'x-software-backend-secret': 'qist-market-software-secret-123'
+          }
+        }
+      );
+    } catch (webErr) {
+      console.error('Failed to cancel on website backend:', {
+        status: webErr.response?.status,
+        data: webErr.response?.data,
+        message: webErr.message
+      });
+    }
+
+    // 2. Use provided order data or fallback to fetch if not provided
+    let websiteOrder = orderData;
+    
+    if (!websiteOrder) {
+        const WEBSITE_DETAIL_URL = `https://api.qistmarket.pk/api/orders/${id}`;
+        try {
+          const detailRes = await axios.get(WEBSITE_DETAIL_URL);
+          websiteOrder = detailRes.data?.data;
+        } catch (fetchErr) {
+          console.error('Failed to fetch website order details:', fetchErr.message);
+        }
+    }
+
+    if (websiteOrder) {
+      // 3. Create a local 'cancelled' record
+      const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const randomNum = Math.floor(1000 + Math.random() * 9000);
+      const order_ref = `QIST-${dateStr}-${randomNum}-CAN`;
+
+      const localOrder = await prisma.order.create({
+        data: {
+          order_ref,
+          token_number: websiteOrder.tokenNumber.toString(),
+          customer_name: websiteOrder.fullName,
+          whatsapp_number: websiteOrder.phone,
+          address: websiteOrder.address,
+          city: websiteOrder.city,
+          area: websiteOrder.area,
+          product_name: websiteOrder.productName,
+          total_amount: parseFloat(websiteOrder.totalDealValue),
+          advance_amount: parseFloat(websiteOrder.advanceAmount),
+          monthly_amount: parseFloat(websiteOrder.monthlyAmount),
+          months: parseInt(websiteOrder.months),
+          channel: 'Website',
+          status: 'cancelled',
+          cancelled_reason: reason,
+          cancelled_at: new Date(),
+          created_at: getPKTDate(new Date()),
+          created_by_user_id: req.user.id,
+          order_notes: `Website Cancelled: ${websiteOrder.tokenNumber}. Reason: ${reason}`
+        }
+      });
+
+      await logOrderStatusChange(localOrder.id, null, 'cancelled', req.user, reason);
+
+      return res.status(200).json({
+        success: true,
+        message: 'Website order cancelled successfully and local record created.',
+        data: { localOrder }
+      });
+    }
+
+    return res.status(404).json({ success: false, message: 'Could not find website order details to cancel.' });
+
+  } catch (error) {
+    console.error('cancelWebsiteOrderFeedItem error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 const createOrderFromWebsitePickup = async (req, res) => {
   const {
     customer_name,
@@ -679,52 +768,33 @@ const getWebsiteOrderFeed = async (req, res) => {
       where: { channel: 'Website' },
       select: { token_number: true }
     });
-    const localTokens = new Set(localOrders.map(o => o.token_number));
+    const localTokens = localOrders.map(o => o.token_number).join(',');
 
-    let accumulatedOrders = [];
-    let currentWebPage = 1;
-    let webTotalItems = 0;
-    const CHUNK_SIZE = 50; // Fetch in larger chunks for efficiency
+    // 2. Fetch from Website API with exclusion
+    const response = await axios.get(WEBSITE_API_URL, {
+      params: { 
+        page: targetPage, 
+        limit: targetLimit, 
+        search,
+        excludeTokens: localTokens 
+      },
+      headers: { 'x-software-backend-secret': 'qist-market-software-secret-123' }
+    });
 
-    // 2. Fetch iteratively until we have enough "Fresh" orders to satisfy the offset + limit
-    // We limit this to a reasonable number of pages to prevent long-running loops (e.g., max 10 pages)
-    while (accumulatedOrders.length < (targetOffset + targetLimit) && currentWebPage <= 10) {
-      const response = await axios.get(WEBSITE_API_URL, {
-        params: { page: currentWebPage, limit: CHUNK_SIZE, search }
-      });
-      const webData = response.data;
-
-      if (!webData.data || webData.data.length === 0) break;
-
-      webTotalItems = webData.pagination?.totalItems || 0;
-
-      // Filter local duplicates
-      const fresh = webData.data.filter(wo => !localTokens.has(wo.tokenNumber.toString()));
-      accumulatedOrders.push(...fresh);
-
-      if (webData.data.length < CHUNK_SIZE) break; // End of source
-      currentWebPage++;
-    }
-
-    // 3. Slice the accumulated results for the current page
-    const paginatedData = accumulatedOrders.slice(targetOffset, targetOffset + targetLimit);
-
-    // 4. Calculate adjusted total
-    const adjustedTotal = Math.max(0, webTotalItems - localTokens.size);
-    const totalPages = Math.ceil(adjustedTotal / targetLimit);
+    const webData = response.data;
 
     return res.status(200).json({
       success: true,
-      data: paginatedData,
-      pagination: {
-        totalItems: adjustedTotal,
-        totalPages: totalPages || 1,
+      data: webData.data || [],
+      pagination: webData.pagination || {
+        totalItems: 0,
+        totalPages: 1,
         currentPage: targetPage,
         limit: targetLimit
       }
     });
   } catch (error) {
-    console.error('Website feed proxy error:', error);
+    console.error('Website feed proxy error:', error.response?.data || error.message);
     return res.status(500).json({
       success: false,
       message: 'Failed to fetch website orders through proxy.'
@@ -1113,27 +1183,18 @@ const getCsrDashboardStats = async (req, res) => {
       website: buildChannelStats(['website']),
     };
 
-    // 3. Target tracking — advance_amount from delivery.selected_plan JSON
-    const deliveredOrdersWithPlan = await prisma.order.findMany({
+    // 3. Target tracking — total_amount from delivered orders
+    const deliveredOrders = await prisma.order.findMany({
       where: { ...baseWhere, status: 'delivered' },
       select: {
         id: true,
-        delivery: { select: { selected_plan: true } }
+        total_amount: true,
       }
     });
 
-    let achievedAmount = 0;
-    deliveredOrdersWithPlan.forEach(order => {
-      if (order.delivery?.selected_plan) {
-        const plan = order.delivery.selected_plan;
-        const advAmt = typeof plan === 'object'
-          ? (Number(plan.advance_amount) || Number(plan.advanceAmount) || Number(plan.downPayment) || 0)
-          : 0;
-        achievedAmount += advAmt;
-      }
-    });
+    const achievedAmount = deliveredOrders.reduce((sum, order) => sum + (order.total_amount || 0), 0);
 
-    const achievedCustomers = deliveredOrdersWithPlan.length;
+    const achievedCustomers = deliveredOrders.length;
     const monthlyTarget = Number(process.env.CSR_MONTHLY_TARGET || process.env.CSR_SALES_TARGET || 0);
     const customerTarget = Number(process.env.CSR_CUSTOMER_TARGET || 0);
     const remaining = monthlyTarget > 0 ? Math.max(0, monthlyTarget - achievedAmount) : 0;
@@ -1147,79 +1208,111 @@ const getCsrDashboardStats = async (req, res) => {
     const successRate = totalOrders > 0 ? Math.round((deliveredCount / totalOrders) * 100) : 0;
     const cancelRate = totalOrders > 0 ? Math.round((cancelledCount / totalOrders) * 100) : 0;
 
-    // 5. CSR Ranking Board (visible to admins and outlet users)
+    // 5. CSR Ranking Board (visible to all CSRs to see where they stand)
     let csrRanking = [];
-    if (isAdmin || isOutlet) {
-      const rankingGroups = await prisma.order.groupBy({
-        by: ['created_by_user_id', 'status'],
-        where: {
-          created_at: dateFilter,
-          created_by_user_id: { not: null },
-        },
-        _count: { id: true },
-      });
+    const rankingGroups = await prisma.order.groupBy({
+      by: ['created_by_user_id', 'status'],
+      where: {
+        created_at: dateFilter,
+        created_by_user_id: { not: null },
+      },
+      _count: { id: true },
+    });
 
-      const csrUserIds = [...new Set(rankingGroups.map(g => g.created_by_user_id).filter(Boolean))];
+    const csrUserIds = [...new Set(rankingGroups.map(g => g.created_by_user_id).filter(Boolean))];
 
-      const csrUsers = await prisma.user.findMany({
-        where: { id: { in: csrUserIds } },
-        select: { id: true, full_name: true, username: true },
-      });
-      const userMap = {};
-      csrUsers.forEach(u => { userMap[u.id] = u; });
+    const csrUsers = await prisma.user.findMany({
+      where: { id: { in: csrUserIds } },
+      select: { 
+        id: true, 
+        full_name: true, 
+        username: true,
+        role: { select: { name: true } }
+      },
+    });
 
-      const rankingMap = {};
-      rankingGroups.forEach(item => {
-        const uid = item.created_by_user_id;
-        if (!uid) return;
-        if (!rankingMap[uid]) {
-          rankingMap[uid] = {
-            total: 0, delivered: 0, cancelled: 0, achievedAmount: 0,
-            user: userMap[uid] || { id: uid, full_name: 'Unknown', username: '?' }
-          };
+    const userMap = {};
+    csrUsers.forEach(u => { 
+      const rname = (u.role?.name || '').toLowerCase();
+      // Only include CSR or Sales roles
+      if (rname.includes('csr') || rname.includes('sales')) {
+        userMap[u.id] = u; 
+      }
+    });
+
+    const rankingMap = {};
+    rankingGroups.forEach(item => {
+      const uid = item.created_by_user_id;
+      if (!uid || !userMap[uid]) return; // Skip if user not in filtered map
+      if (!rankingMap[uid]) {
+        rankingMap[uid] = {
+          total: 0, delivered: 0, cancelled: 0, 
+          transferred: 0, completedInOutlet: 0, 
+          achievedAmount: 0,
+          user: userMap[uid]
+        };
+      }
+      rankingMap[uid].total += item._count.id;
+      if (item.status === 'delivered') rankingMap[uid].delivered += item._count.id;
+      if (item.status === 'cancelled') rankingMap[uid].cancelled += item._count.id;
+    });
+
+    // Get transferred/completed details and total_amount per CSR
+    const csrOrdersDetail = await prisma.order.findMany({
+      where: {
+        created_at: dateFilter,
+        created_by_user_id: { not: null },
+      },
+      select: {
+        created_by_user_id: true,
+        status: true,
+        outlet_id: true,
+        total_amount: true,
+      }
+    });
+
+    csrOrdersDetail.forEach(order => {
+      const uid = order.created_by_user_id;
+      if (uid && rankingMap[uid]) {
+        // Track transferred stats
+        if (order.outlet_id) {
+          rankingMap[uid].transferred += 1;
+          if (['delivered', 'completed'].includes(order.status)) {
+            rankingMap[uid].completedInOutlet += 1;
+          }
         }
-        rankingMap[uid].total += item._count.id;
-        if (item.status === 'delivered') rankingMap[uid].delivered += item._count.id;
-        if (item.status === 'cancelled') rankingMap[uid].cancelled += item._count.id;
-      });
-
-      // Get advance amounts per CSR from delivered orders
-      const csrDeliveredOrders = await prisma.order.findMany({
-        where: {
-          created_at: dateFilter,
-          status: 'delivered',
-          created_by_user_id: { not: null },
-        },
-        select: {
-          created_by_user_id: true,
-          delivery: { select: { selected_plan: true } }
+        // Track achieved amount for delivered orders
+        if (order.status === 'delivered') {
+          rankingMap[uid].achievedAmount += (order.total_amount || 0);
         }
-      });
+      }
+    });
 
-      csrDeliveredOrders.forEach(order => {
-        const uid = order.created_by_user_id;
-        if (uid && rankingMap[uid] && order.delivery?.selected_plan) {
-          const plan = order.delivery.selected_plan;
-          const advAmt = typeof plan === 'object'
-            ? (Number(plan.advance_amount) || Number(plan.advanceAmount) || Number(plan.downPayment) || 0)
-            : 0;
-          rankingMap[uid].achievedAmount += advAmt;
-        }
-      });
+    const monthlyTargetForRanking = Number(process.env.CSR_MONTHLY_TARGET || 0);
 
-      csrRanking = Object.values(rankingMap)
-        .map(entry => ({
+    csrRanking = Object.values(rankingMap)
+      .map(entry => {
+        const remainingInOutlet = entry.transferred - entry.completedInOutlet;
+        const targetProgress = monthlyTargetForRanking > 0 
+          ? Math.round((entry.achievedAmount / monthlyTargetForRanking) * 100) 
+          : 0;
+
+        return {
           userId: entry.user.id,
           name: entry.user.full_name,
           username: entry.user.username,
           totalOrders: entry.total,
           delivered: entry.delivered,
           cancelled: entry.cancelled,
+          transferred: entry.transferred,
+          completedInOutlet: entry.completedInOutlet,
+          remainingInOutlet: remainingInOutlet > 0 ? remainingInOutlet : 0,
           achievedAmount: entry.achievedAmount,
+          targetProgress: targetProgress,
           successRate: entry.total > 0 ? Math.round((entry.delivered / entry.total) * 100) : 0,
-        }))
-        .sort((a, b) => b.successRate - a.successRate);
-    }
+        };
+      })
+      .sort((a, b) => b.achievedAmount - a.achievedAmount || b.successRate - a.successRate);
 
     return res.status(200).json({
       success: true,
@@ -1248,7 +1341,7 @@ const getCsrDashboardStats = async (req, res) => {
           achievedCustomers,
           customerTarget,
           dailyAvgRequired,
-          progressPct: monthlyTarget > 0 ? Math.min(100, Math.round((achievedAmount / monthlyTarget) * 100)) : 0,
+          progressPct: monthlyTarget > 0 ? Math.round((achievedAmount / monthlyTarget) * 100) : 0,
         },
         csrRanking,
       },
@@ -1612,7 +1705,7 @@ const assignOrder = async (req, res) => {
       data: {
         assigned_to_user_id: parseInt(user_id),
         verification_assigned_at: getPKTDate(new Date()),
-        status: 'pending'
+        status: order.status === 'in_progress' ? 'in_progress' : 'pending'
       },
       include: {
         assigned_to: { select: { id: true, username: true, fcm_token: true } },
@@ -1621,9 +1714,9 @@ const assignOrder = async (req, res) => {
     });
 
     if (req.user.outlet_id) {
-      await logOrderStatusChange(updatedOrder.id, 'transferred', 'pending', req.user);
+      await logOrderStatusChange(updatedOrder.id, 'transferred', updatedOrder.status, req.user);
     } else {
-      await logOrderStatusChange(updatedOrder.id, order.status, 'pending', req.user);
+      await logOrderStatusChange(updatedOrder.id, order.status, updatedOrder.status, req.user);
     }
 
     const io = req.app.get('io');
@@ -1705,12 +1798,28 @@ const assignBulk = async (req, res) => {
     }));
 
     await prisma.$transaction([
+      // 1. Update orders that are NOT in_progress to 'pending'
       prisma.order.updateMany({
-        where: { id: { in: order_ids.map(Number) } },
+        where: { 
+          id: { in: order_ids.map(Number) },
+          status: { not: 'in_progress' }
+        },
         data: {
           assigned_to_user_id: parseInt(user_id),
           verification_assigned_at: getPKTDate(new Date()),
           status: 'pending'
+        }
+      }),
+      // 2. Update orders that ARE in_progress to keep 'in_progress'
+      prisma.order.updateMany({
+        where: { 
+          id: { in: order_ids.map(Number) },
+          status: 'in_progress'
+        },
+        data: {
+          assigned_to_user_id: parseInt(user_id),
+          verification_assigned_at: getPKTDate(new Date()),
+          status: 'in_progress'
         }
       }),
       prisma.verification.createMany({
@@ -3034,6 +3143,7 @@ module.exports = {
   sendOrderAssignmentNotification,
   createOrderFromWebsitePickup,
   getWebsiteOrderFeed,
+  cancelWebsiteOrderFeedItem,
   transferOrder,
   transferBulk,
   getSelfPickupInventory,

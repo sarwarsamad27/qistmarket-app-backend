@@ -28,6 +28,7 @@ const {
   getExpiredAssignedOrders,
   createOrderFromWebsitePickup,
   getWebsiteOrderFeed,
+  cancelWebsiteOrderFeedItem,
   transferOrder,
   transferBulk,
   getSelfPickupInventory,
@@ -64,6 +65,7 @@ router.post('/orders/assign-bulk', authenticateJWT, assignBulk);
 router.get('/orders/:id', authenticateJWT, getOrderById);
 router.patch('/orders/:id/assign-delivery', authenticateJWT, assignDelivery);
 router.post('/orders/assign-bulk-delivery', authenticateJWT, assignBulkDelivery);
+router.patch('/orders/website-feed/:id/cancel', authenticateJWT, cancelWebsiteOrderFeedItem);
 router.patch('/orders/:id/cancel', authenticateJWT, cancelOrder);
 router.patch('/orders/:id/update-item', authenticateJWT, updateOrderItem);
 router.patch('/orders/:id/take', authenticateJWT, takeOrder);
