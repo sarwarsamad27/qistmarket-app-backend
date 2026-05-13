@@ -7,6 +7,7 @@ const { getPKTDate } = require("../utils/dateUtils");
 const { logAction } = require('../utils/auditLogger');
 const { sendOTP, sendTemplate, sendOrderStatusNotification } = require('../services/watiService');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
+const { getOrCreateCustomer, checkRepeatStatus, updateCsrRanking, getWorkingDaysLeftInMonth } = require('../services/rankingService');
 
 const admin = require('firebase-admin');
 
@@ -490,6 +491,25 @@ const createOrder = async (req, res) => {
 
     await logOrderStatusChange(order.id, null, order.status, req.user);
 
+    // Link customer and check repeat status for ranking
+    try {
+        const customer = await getOrCreateCustomer(order.id);
+        if (customer) {
+            const isRepeat = await checkRepeatStatus(customer.id, order.id);
+            if (isRepeat) {
+                await prisma.order.update({
+                    where: { id: order.id },
+                    data: { is_repeat_customer: true }
+                });
+            }
+        }
+        // Update Ranking snapshots
+        await updateCsrRanking(req.user.id, 'month');
+        await updateCsrRanking(req.user.id, 'today');
+    } catch (rankingError) {
+        console.error('Ranking update failed:', rankingError);
+    }
+
     const io = req.app.get('io');
     if (assignedOfficerId) {
       await sendOrderAssignmentNotification(order, order.assigned_to, 'verification', io);
@@ -732,7 +752,7 @@ const createOrderFromWebsitePickup = async (req, res) => {
       }
     });
 
-    await logOrderStatusChange(order.id, null, 'new', req.user);
+    await logOrderStatusChange(order.id, null, 'new', req.user, null, true);
 
     return res.status(201).json({
       success: true,
@@ -867,7 +887,9 @@ const getOrders = async (req, res) => {
 
     const include = {
       created_by: { select: { username: true } },
-      assigned_to: { select: { username: true } },
+      assigned_to: { select: { username: true, full_name: true } },
+      delivery_officer: { select: { username: true, full_name: true } },
+      recovery_officer: { select: { username: true, full_name: true } },
       productHistories: {
         include: {
           changed_by: { select: { username: true, full_name: true } }
@@ -1099,29 +1121,41 @@ const getCsrDashboardStats = async (req, res) => {
     const isAdmin = [4, 6, 7, 9].includes(userRoleId);
     const isOutlet = userRoleId === 5;
 
-    // Date range calculation
+    // Trigger async ranking update for the current CSR on visit
+    if (isCsr) {
+        updateCsrRanking(userId, 'today').catch(err => console.error('Auto-ranking update error:', err));
+        updateCsrRanking(userId, 'month').catch(err => console.error('Auto-ranking update error:', err));
+    }
+
+    // Date range calculation using PKT
+    const now = getPKTDate();
     let start, end;
-    const now = new Date();
 
     if (filter === 'today') {
-      start = new Date(now); start.setHours(0, 0, 0, 0);
-      end = new Date(now); end.setHours(23, 59, 59, 999);
+      start = new Date(now);
+      start.setHours(0, 0, 0, 0);
+      end = new Date(now);
+      end.setHours(23, 59, 59, 999);
     } else if (filter === 'month') {
       start = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
       end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
     } else if (filter === 'custom' && startDate && endDate) {
-      start = new Date(startDate); start.setHours(0, 0, 0, 0);
-      end = new Date(endDate); end.setHours(23, 59, 59, 999);
+      start = new Date(startDate);
+      start.setHours(0, 0, 0, 0);
+      end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
     } else {
-      start = new Date(now); start.setHours(0, 0, 0, 0);
-      end = new Date(now); end.setHours(23, 59, 59, 999);
+      start = new Date(now);
+      start.setHours(0, 0, 0, 0);
+      end = new Date(now);
+      end.setHours(23, 59, 59, 999);
     }
 
     const dateFilter = { gte: start, lte: end };
 
     // Base where clause — CSR sees only their own orders
     const baseWhere = {
-      created_at: dateFilter,
+      updated_at: dateFilter,
       ...(isCsr ? { created_by_user_id: userId } : {}),
     };
 
@@ -1203,120 +1237,76 @@ const getCsrDashboardStats = async (req, res) => {
     const customerTarget = Number(process.env.CSR_CUSTOMER_TARGET || 0);
     const remaining = monthlyTarget > 0 ? Math.max(0, monthlyTarget - achievedAmount) : 0;
 
-    // Days remaining in current month for daily avg calc
-    const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-    const daysLeft = Math.max(1, daysInMonth - now.getDate() + 1);
-    const dailyAvgRequired = remaining > 0 ? Math.round(remaining / daysLeft) : 0;
+    const workingDaysLeft = getWorkingDaysLeftInMonth();
+    const dailyAvgRequired = remaining > 0 ? Math.round(remaining / workingDaysLeft) : 0;
 
     // 4. Overall success metrics
     const successRate = totalOrders > 0 ? Math.round((deliveredCount / totalOrders) * 100) : 0;
     const cancelRate = totalOrders > 0 ? Math.round((cancelledCount / totalOrders) * 100) : 0;
 
-    // 5. CSR Ranking Board (visible to all CSRs to see where they stand)
-    let csrRanking = [];
-    const rankingGroups = await prisma.order.groupBy({
-      by: ['created_by_user_id', 'status'],
+    // 5. CSR Ranking Board
+    const rankingPeriod = filter === 'custom' ? 'month' : filter;
+    // Fetch all Sales Officers to ensure they always appear on the board
+    const salesOfficers = await prisma.user.findMany({
       where: {
-        created_at: dateFilter,
-        created_by_user_id: { not: null },
-      },
-      _count: { id: true },
-    });
-
-    const csrUserIds = [...new Set(rankingGroups.map(g => g.created_by_user_id).filter(Boolean))];
-
-    const csrUsers = await prisma.user.findMany({
-      where: { id: { in: csrUserIds } },
-      select: { 
-        id: true, 
-        full_name: true, 
-        username: true,
-        role: { select: { name: true } }
-      },
-    });
-
-    const userMap = {};
-    csrUsers.forEach(u => { 
-      const rname = (u.role?.name || '').toLowerCase();
-      // Only include CSR or Sales roles
-      if (rname.includes('csr') || rname.includes('sales')) {
-        userMap[u.id] = u; 
-      }
-    });
-
-    const rankingMap = {};
-    rankingGroups.forEach(item => {
-      const uid = item.created_by_user_id;
-      if (!uid || !userMap[uid]) return; // Skip if user not in filtered map
-      if (!rankingMap[uid]) {
-        rankingMap[uid] = {
-          total: 0, delivered: 0, cancelled: 0, 
-          transferred: 0, completedInOutlet: 0, 
-          achievedAmount: 0,
-          user: userMap[uid]
-        };
-      }
-      rankingMap[uid].total += item._count.id;
-      if (item.status === 'delivered') rankingMap[uid].delivered += item._count.id;
-      if (item.status === 'cancelled') rankingMap[uid].cancelled += item._count.id;
-    });
-
-    // Get transferred/completed details and total_amount per CSR
-    const csrOrdersDetail = await prisma.order.findMany({
-      where: {
-        created_at: dateFilter,
-        created_by_user_id: { not: null },
+        role: {
+          name: 'Sales Officer'
+        }
       },
       select: {
-        created_by_user_id: true,
-        status: true,
-        outlet_id: true,
-        total_amount: true,
+        id: true,
+        full_name: true,
+        username: true,
+        image: true
       }
     });
 
-    csrOrdersDetail.forEach(order => {
-      const uid = order.created_by_user_id;
-      if (uid && rankingMap[uid]) {
-        // Track transferred stats
-        if (order.outlet_id) {
-          rankingMap[uid].transferred += 1;
-          if (['delivered', 'completed'].includes(order.status)) {
-            rankingMap[uid].completedInOutlet += 1;
-          }
-        }
-        // Track achieved amount for delivered orders
-        if (order.status === 'delivered') {
-          rankingMap[uid].achievedAmount += (order.total_amount || 0);
-        }
+    // Fetch existing rankings for the period
+    const rankings = await prisma.csrRanking.findMany({
+      where: {
+        period: rankingPeriod,
+        month: rankingPeriod === 'month' ? now.getMonth() + 1 : 0,
+        year: rankingPeriod === 'month' ? now.getFullYear() : 0,
       }
     });
 
-    const monthlyTargetForRanking = Number(process.env.CSR_MONTHLY_TARGET || 0);
+    // Map rankings by CSR ID for quick lookup
+    const rankingMap = rankings.reduce((acc, r) => {
+      acc[r.csr_id] = r;
+      return acc;
+    }, {});
 
-    csrRanking = Object.values(rankingMap)
-      .map(entry => {
-        const remainingInOutlet = entry.transferred - entry.completedInOutlet;
-        const targetProgress = monthlyTargetForRanking > 0 
-          ? Math.round((entry.achievedAmount / monthlyTargetForRanking) * 100) 
-          : 0;
+    let csrRanking = salesOfficers.map(officer => {
+      const rankRecord = rankingMap[officer.id];
+      const isStaleToday = rankingPeriod === 'today' && rankRecord && rankRecord.updated_at < start;
+      const useData = rankRecord && !isStaleToday;
 
-        return {
-          userId: entry.user.id,
-          name: entry.user.full_name,
-          username: entry.user.username,
-          totalOrders: entry.total,
-          delivered: entry.delivered,
-          cancelled: entry.cancelled,
-          transferred: entry.transferred,
-          completedInOutlet: entry.completedInOutlet,
-          remainingInOutlet: remainingInOutlet > 0 ? remainingInOutlet : 0,
-          achievedAmount: entry.achievedAmount,
-          targetProgress: targetProgress,
-          successRate: entry.total > 0 ? Math.round((entry.delivered / entry.total) * 100) : 0,
-        };
-      })
-      .sort((a, b) => b.achievedAmount - a.achievedAmount || b.successRate - a.successRate);
+      return {
+        userId: officer.id,
+        name: officer.full_name,
+        username: officer.username,
+        image: officer.image,
+        uniqueCustomers: useData ? rankRecord.unique_customers : 0,
+        delivered: useData ? rankRecord.delivered_customers : 0,
+        repeatCustomers: useData ? rankRecord.repeat_customers : 0,
+        cancelled: useData ? rankRecord.cancelled_customers : 0,
+        expired: useData ? rankRecord.expired_customers : 0,
+        totalSales: useData ? rankRecord.total_sales : 0,
+        score: useData ? rankRecord.score : 0,
+        trend: useData ? rankRecord.trend : 0,
+        successRate: (useData && rankRecord.unique_customers > 0) ? Math.round((rankRecord.delivered_customers / rankRecord.unique_customers) * 100) : 0,
+        cancelRate: (useData && rankRecord.unique_customers > 0) ? Math.round((rankRecord.cancelled_customers / rankRecord.unique_customers) * 100) : 0,
+      };
+    });
+
+    // Sort by score desc, then total sales desc
+    csrRanking.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return b.totalSales - a.totalSales;
+    });
+
+    // Add rank index
+    csrRanking = csrRanking.map((r, index) => ({ ...r, rank: index + 1 }));
 
     return res.status(200).json({
       success: true,
@@ -1613,7 +1603,8 @@ const getOrderById = async (req, res) => {
               }
             }
           }
-        }
+        },
+        dummyCustomer: true
       },
     });
 
@@ -1970,18 +1961,37 @@ const getVerificationOrders = async (req, res) => {
         { customer_name: { contains: search } },
         { whatsapp_number: { contains: search } },
         { order_ref: { contains: search } },
+        { area: { contains: search } },
       ];
     }
+
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value) {
+        if (key === 'assigned_to' || key === 'Verification Officer' || key === 'officer') {
+           where.verification = { verification_officer: { username: { contains: value } } };
+        } else if (key === 'delivery_officer') {
+          where.delivery_officer = { username: { contains: value } };
+        } else if (key === 'created_by') {
+          where.created_by = { username: { contains: value } };
+        } else if (key === 'dateRange') {
+          const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
+          if (range) where.created_at = range;
+        } else if (key !== 'startDate' && key !== 'endDate') {
+          where[key] = { contains: value };
+        }
+      }
+    });
 
     const [orders, total] = await prisma.$transaction([
       prisma.order.findMany({
         where,
         skip,
         take,
-        orderBy: { created_at: 'desc' },
+        orderBy: { [sortBy]: sortDir },
         include: {
           created_by: { select: { username: true, full_name: true } },
           assigned_to: { select: { username: true, full_name: true } },
+          delivery_officer: { select: { username: true, full_name: true } },
           verification: {
             include: {
               verification_officer: { select: { username: true, full_name: true } }
@@ -2013,7 +2023,7 @@ const getVerificationOrders = async (req, res) => {
 };
 
 const getApprovedOrders = async (req, res) => {
-  const { page = 1, limit = 10, search = '' } = req.query;
+  const { page = 1, limit = 10, search = '', sortBy = 'updated_at', sortDir = 'desc', ...filters } = req.query;
   const skip = (Number(page) - 1) * Number(limit);
   const take = Number(limit);
 
@@ -2036,20 +2046,42 @@ const getApprovedOrders = async (req, res) => {
       ];
     }
 
+    if (userRole === 'sales officer' || userRole.includes('csr')) {
+      where.created_by_user_id = req.user.id;
+    }
+
     if (search.trim()) {
       where.OR = [
         { customer_name: { contains: search } },
         { whatsapp_number: { contains: search } },
         { order_ref: { contains: search } },
+        { area: { contains: search } },
       ];
     }
+
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value) {
+        if (key === 'assigned_to' || key === 'Verification Officer') {
+          where.assigned_to = { username: { contains: value } };
+        } else if (key === 'delivery_officer') {
+          where.delivery_officer = { username: { contains: value } };
+        } else if (key === 'created_by') {
+          where.created_by = { username: { contains: value } };
+        } else if (key === 'dateRange') {
+          const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
+          if (range) where.created_at = range;
+        } else if (key !== 'startDate' && key !== 'endDate') {
+          where[key] = { contains: value };
+        }
+      }
+    });
 
     const [orders, total] = await prisma.$transaction([
       prisma.order.findMany({
         where,
         skip,
         take,
-        orderBy: { updated_at: 'desc' },
+        orderBy: { [sortBy]: sortDir },
         include: {
           verification: {
             include: {
@@ -2421,7 +2453,7 @@ const getDeliveryStatus = async (req, res) => {
 };
 
 const getDeliveredOrders = async (req, res) => {
-  const { page = 1, limit = 10 } = req.query;
+  const { page = 1, limit = 10, search = '', sortBy = 'updated_at', sortDir = 'desc', ...filters } = req.query;
   const skip = (Number(page) - 1) * Number(limit);
   const take = Number(limit);
 
@@ -2443,13 +2475,43 @@ const getDeliveredOrders = async (req, res) => {
         }
       ];
     }
+
+    if (search.trim()) {
+      where.OR = [
+        { customer_name: { contains: search } },
+        { whatsapp_number: { contains: search } },
+        { order_ref: { contains: search } },
+        { area: { contains: search } },
+      ];
+    }
+
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value) {
+        if (key === 'assigned_to' || key === 'Verification Officer') {
+          where.assigned_to = { username: { contains: value } };
+        } else if (key === 'delivery_officer') {
+          where.delivery_officer = { username: { contains: value } };
+        } else if (key === 'recovery_officer') {
+          where.recovery_officer = { username: { contains: value } };
+        } else if (key === 'created_by') {
+          where.created_by = { username: { contains: value } };
+        } else if (key === 'dateRange') {
+          const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
+          if (range) where.created_at = range;
+        } else if (key !== 'startDate' && key !== 'endDate') {
+          where[key] = { contains: value };
+        }
+      }
+    });
+
     const orders = await prisma.order.findMany({
       where,
       skip,
       take,
-      orderBy: { updated_at: 'desc' },
+      orderBy: { [sortBy]: sortDir },
       include: {
         created_by: { select: { username: true } },
+        assigned_to: { select: { username: true, full_name: true } },
         delivery_officer: { select: { username: true, full_name: true } },
         recovery_officer: { select: { username: true, full_name: true } },
       },
@@ -2909,6 +2971,7 @@ const sendIndividualConvertOTP = async (req, res) => {
                 { name: '1', value: otp },
                 { name: 'name', value: name }
             ]);
+            console.log(  "OTP sent to " + phone + "Name" + name + " with template " + template_name + " and broadcast " + broadcast_name);
         } else {
             await sendOTP(phone, otp);
         }
@@ -3005,8 +3068,18 @@ const createConvertedSale = async (req, res) => {
         created_at: getPKTDate(new Date()),
         created_by_user_id: req.user.id,
         outlet_id: orderData.outlet_id || currentUser?.outlet_id || null,
+        is_repeat_customer: true
       }
     });
+
+    // Link customer for ranking
+    try {
+        await getOrCreateCustomer(newOrder.id);
+        await updateCsrRanking(req.user.id, 'month');
+        await updateCsrRanking(req.user.id, 'today');
+    } catch (rankingError) {
+        console.error('Ranking update failed in conversion:', rankingError);
+    }
 
     // Fetch old verification to clone documents and locations
     const { oldOrderId } = req.body;

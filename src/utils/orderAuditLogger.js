@@ -1,6 +1,7 @@
 const prisma = require('../../lib/prisma');
 const { getPKTDate } = require("../utils/dateUtils");
 const { sendOrderStatusNotification } = require('../services/watiService');
+const { updateCsrRanking } = require('../services/rankingService');
 
 /**
  * Logs a status change for an order and sends a WhatsApp notification via Wati.
@@ -130,6 +131,18 @@ async function logOrderStatusChange(order_id, old_status, new_status, user, rema
         customerName: `Assalam-o-Alaikum ${customerName}!`,
         message: message
       }).catch(err => console.error('[WATI] Notification Error:', err));
+    }
+
+    // Trigger CSR Ranking Update on specific status changes that affect scores
+    if (['delivered', 'completed', 'cancelled', 'expired'].includes(new_status.toLowerCase())) {
+        const orderForRanking = await prisma.order.findUnique({
+            where: { id: parseInt(order_id) },
+            select: { created_by_user_id: true }
+        });
+        if (orderForRanking?.created_by_user_id) {
+            updateCsrRanking(orderForRanking.created_by_user_id, 'month').catch(err => console.error('Ranking update error:', err));
+            updateCsrRanking(orderForRanking.created_by_user_id, 'today').catch(err => console.error('Ranking update error:', err));
+        }
     }
 
   } catch (error) {

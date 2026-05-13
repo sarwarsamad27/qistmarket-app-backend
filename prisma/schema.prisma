@@ -78,6 +78,7 @@ model User {
   vendor_purchase_edits          VendorPurchaseEditHistory[] @relation("vendor_purchase_edits")
   collected_payments             OrderPayment[]            @relation("PaymentCollector")
   status_changes                 OrderStatusHistory[]      @relation("UserOrderStatusChanges")
+  csr_rankings                   CsrRanking[]
 
   @@index([role_id])
   @@index([is_online])
@@ -143,6 +144,9 @@ model Order {
   delivery_officer         User?                 @relation("deliveryOrders", fields: [delivery_officer_id], references: [id])
   outlet                   Outlet?               @relation(fields: [outlet_id], references: [id])
   recovery_officer         User?                 @relation("recoveryOrders", fields: [recovery_officer_id], references: [id])
+  customer_id              Int?
+  is_repeat_customer       Boolean               @default(false)
+  customer                 Customer?             @relation(fields: [customer_id], references: [id])
   payments                 OrderPayment[]
   productHistories         OrderProductHistory[]
   verification             Verification?         @relation("OrderVerification")
@@ -1058,4 +1062,41 @@ model AppVersion {
 enum EmploymentType {
   EMPLOYED
   SELF_EMPLOYED
+}
+
+model Customer {
+  id               Int      @id @default(autoincrement())
+  cnic             String?  @unique
+  mobile           String   @unique
+  name             String
+  is_blacklisted   Boolean  @default(false)
+  created_at       DateTime @default(now())
+  updated_at       DateTime @updatedAt
+  orders           Order[]
+
+  @@map("customers")
+}
+
+model CsrRanking {
+  id                Int      @id @default(autoincrement())
+  csr_id            Int
+  period            String   // "today", "week", "month"
+  month             Int?     // 1-12
+  year              Int?
+  unique_customers  Int      @default(0)
+  delivered_customers Int    @default(0)
+  completed_customers Int    @default(0)
+  repeat_customers    Int    @default(0)
+  cancelled_customers Int    @default(0)
+  expired_customers   Int    @default(0)
+  total_sales       Float    @default(0)
+  score             Float    @default(0)
+  rank              Int      @default(0)
+  trend             Int      @default(0) // -1, 0, 1
+  updated_at        DateTime @updatedAt
+
+  user              User     @relation(fields: [csr_id], references: [id])
+
+  @@unique([csr_id, period, month, year])
+  @@map("csr_rankings")
 }

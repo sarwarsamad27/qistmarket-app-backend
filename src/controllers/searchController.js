@@ -43,7 +43,7 @@ const globalSearch = async (req, res) => {
                 delivery: true,
                 installment_ledger: true
             },
-            take: 20
+            take: 100
         });
 
         // Search in Verifications (Name, CNIC, Purchaser Phone)
@@ -68,7 +68,7 @@ const globalSearch = async (req, res) => {
                     }
                 }
             },
-            take: 10
+            take: 50
         });
 
         const grantorMatches = await prisma.grantorVerification.findMany({
@@ -92,7 +92,7 @@ const globalSearch = async (req, res) => {
                     }
                 }
             },
-            take: 10
+            take: 50
         });
 
         // Consolidate unique orders
