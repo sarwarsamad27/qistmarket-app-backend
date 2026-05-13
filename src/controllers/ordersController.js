@@ -770,14 +770,13 @@ const getWebsiteOrderFeed = async (req, res) => {
     });
     const localTokens = localOrders.map(o => o.token_number).join(',');
 
-    // 2. Fetch from Website API with exclusion
-    const response = await axios.get(WEBSITE_API_URL, {
-      params: { 
-        page: targetPage, 
-        limit: targetLimit, 
-        search,
-        excludeTokens: localTokens 
-      },
+    // 2. Fetch from Website API with exclusion via POST to avoid "URI Too Large" errors
+    const response = await axios.post(`${WEBSITE_API_URL}-feed`, {
+      page: targetPage, 
+      limit: targetLimit, 
+      search,
+      excludeTokens: localTokens 
+    }, {
       headers: { 'x-software-backend-secret': 'qist-market-software-secret-123' }
     });
 
@@ -2279,6 +2278,7 @@ const cancelOrder = async (req, res) => {
 
     await logOrderStatusChange(updatedOrder.id, oldStatus, 'cancelled', req.user);
 
+    if (updatedOrder.outlet_id) {
     await logAction(
       req,
       'ORDER_CANCELLATION',
@@ -2286,6 +2286,7 @@ const cancelOrder = async (req, res) => {
       updatedOrder.id,
       'Order'
     );
+    }
 
     const io = req.app.get('io');
     await notifyAdmins(
