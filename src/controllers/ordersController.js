@@ -1138,11 +1138,16 @@ const getCsrDashboardStats = async (req, res) => {
     }, {});
 
     const totalOrders = Object.values(statusCounts).reduce((a, b) => a + b, 0);
-    const deliveredCount = statusCounts['delivered'] || 0;
-    const completedCount = statusCounts['completed'] || 0;
-    const cancelledCount = statusCounts['cancelled'] || 0;
-    const expiredCount = statusCounts['expired'] || 0;
+    const newCount = statusCounts['new'] || 0;
+    const pendingCount = statusCounts['pending'] || 0;
     const inProgressCount = statusCounts['in_progress'] || 0;
+    const cancelledCount = statusCounts['cancelled'] || 0;
+    const completedCount = statusCounts['completed'] || 0;
+    const deliveredCount = statusCounts['delivered'] || 0;
+    const expiredCount = statusCounts['expired'] || 0;
+    const approvedCount = statusCounts['approved'] || 0;
+    const pickedCount = statusCounts['picked'] || 0;
+    const rejectedCount = statusCounts['rejected'] || 0;
 
     // 2. Channel breakdown (with status sub-grouping)
     const channelGroups = await prisma.order.groupBy({
@@ -1321,14 +1326,16 @@ const getCsrDashboardStats = async (req, res) => {
         isCsr,
         totalOrders,
         statusCounts: {
-          delivered: deliveredCount,
-          completed: completedCount,
-          cancelled: cancelledCount,
-          expired: expiredCount,
+          new: newCount,
+          pending: pendingCount,
           in_progress: inProgressCount,
-          new: statusCounts['new'] || 0,
-          pending: statusCounts['pending'] || 0,
-          approved: statusCounts['approved'] || 0,
+          cancelled: cancelledCount,
+          completed: completedCount,
+          delivered: deliveredCount,
+          expired: expiredCount,
+          approved: approvedCount,
+          picked: pickedCount,
+          rejected: rejectedCount,
         },
         channelStats,
         successRate,
