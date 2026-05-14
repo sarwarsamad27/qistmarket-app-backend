@@ -20,7 +20,7 @@ if (!admin.apps.length) {
 async function sendStockTransferOTPNotification(user, otp, recipientType, io = null) {
   const title = 'Stock Transfer OTP';
   const message = `Your Stock Transfer OTP is: ${otp}`;
-  const notificationType = 'transfer_otp';
+  const notificationType = 'stock_transfer_otp';
   
   if (user?.id) {
     await notifyUser(user.id, title, message, notificationType, null, io);
@@ -155,20 +155,22 @@ const getInventory = async (req, res) => {
             orderBy: [{ product_name: 'asc' }, { id: 'asc' }]
         });
 
-        // 3. Calculate Global Stats
-        const statsData = await prisma.outletInventory.aggregate({
-            where: { outlet_id },
-            _sum: { quantity: true }
-        });
-
-        const [inStockCount, soldCount] = await Promise.all([
-            prisma.outletInventory.aggregate({
-                where: { outlet_id, status: 'In Stock' },
-                _sum: { quantity: true }
+        // 3. Calculate Global Stats (Count unique product names)
+        const [totalUniqueProducts, inStockUnique, soldUnique] = await Promise.all([
+            prisma.outletInventory.groupBy({
+                by: ['product_name'],
+                where: { outlet_id },
+                _count: true
             }),
-            prisma.outletInventory.aggregate({
+            prisma.outletInventory.groupBy({
+                by: ['product_name'],
+                where: { outlet_id, status: 'In Stock' },
+                _count: true
+            }),
+            prisma.outletInventory.groupBy({
+                by: ['product_name'],
                 where: { outlet_id, status: 'Sold' },
-                _sum: { quantity: true }
+                _count: true
             })
         ]);
 
@@ -176,9 +178,9 @@ const getInventory = async (req, res) => {
             success: true, 
             inventory, // Frontend will group these by product_name
             stats: {
-                totalStock: statsData._sum.quantity || 0,
-                inStock: inStockCount._sum.quantity || 0,
-                sold: soldCount._sum.quantity || 0
+                totalStock: totalUniqueProducts.length || 0,
+                inStock: inStockUnique.length || 0,
+                sold: soldUnique.length || 0
             },
             pagination: {
                 total, // total unique products
@@ -280,113 +282,36 @@ const initiateStockTransfer = async (req, res) => {
     const targetId = parseInt(to_id);
 
     try {
-        if (to_type === 'Outlet') {
-            const targetOutlet = await prisma.outlet.findUnique({ where: { id: targetId } });
-            if (!targetOutlet) return res.status(404).json({ success: false, message: 'Target outlet not found.' });
-            if (targetOutlet.id === outlet_id) return res.status(400).json({ success: false, message: 'Cannot transfer to same outlet.' });
-
-            // Perform immediate transfer for Outlets (No OTP)
-            const rawIds = inventory_ids.map(i => typeof i === 'object' ? parseInt(i.id) : parseInt(i));
-            const items = await prisma.outletInventory.findMany({
-                where: { id: { in: rawIds }, outlet_id, status: 'In Stock' }
-            });
-
-            if (items.length !== rawIds.length) {
-                return res.status(400).json({ success: false, message: 'Some items not found or not in stock.' });
-            }
-
-            const transfers = await prisma.$transaction(async (tx) => {
-                const transferData = [];
-                for (const payloadItem of inventory_ids) {
-                    const recordId = typeof payloadItem === 'object' ? payloadItem.id : payloadItem;
-                    const transferQty = typeof payloadItem === 'object' ? (parseInt(payloadItem.quantity) || 1) : 1;
-                    const item = items.find(i => i.id === recordId);
-                    if (!item) continue;
-
-                    let isFullTransfer = (item.quantity <= transferQty);
-                    let actualTransferQty = isFullTransfer ? item.quantity : transferQty;
-                    let finalInventoryId = item.id;
-
-                    if (isFullTransfer) {
-                        await tx.outletInventory.update({
-                            where: { id: item.id },
-                            data: { outlet_id: targetId, status: 'In Stock' }
-                        });
-                    } else {
-                        await tx.outletInventory.update({
-                            where: { id: item.id },
-                            data: { quantity: item.quantity - actualTransferQty }
-                        });
-
-                        const existingAtTarget = await tx.outletInventory.findFirst({
-                            where: { outlet_id: targetId, product_name: item.product_name, status: 'In Stock' }
-                        });
-
-                        if (existingAtTarget) {
-                            const updated = await tx.outletInventory.update({
-                                where: { id: existingAtTarget.id },
-                                data: { quantity: existingAtTarget.quantity + actualTransferQty }
-                            });
-                            finalInventoryId = updated.id;
-                        } else {
-                            const duplicate = await tx.outletInventory.findFirst({ where: { outlet_id: targetId, imei_serial: item.imei_serial } });
-                            if (duplicate) {
-                                return res.status(400).json({ success: false, message: `IMEI/Serial ${item.imei_serial} already exists in stock.` });
-                            }
-                            const cloned = await tx.outletInventory.create({
-                                data: {
-                                    outlet_id: targetId,
-                                    product_name: item.product_name,
-                                    category: item.category,
-                                    imei_serial: item.imei_serial || null,
-                                    color_variant: item.color_variant || null,
-                                    quantity: actualTransferQty,
-                                    purchase_price: item.purchase_price,
-                                    installment_price: item.installment_price,
-                                    status: 'In Stock'
-                                }
-                            });
-                            finalInventoryId = cloned.id;
-                        }
-                    }
-
-                    transferData.push({
-                        from_type: 'Outlet', from_id: outlet_id,
-                        to_type: 'Outlet', to_id: targetId,
-                        inventory_id: finalInventoryId,
-                        quantity_transferred: actualTransferQty
-                    });
-                }
-                await tx.stockTransfer.createMany({ data: transferData });
-                return transferData;
-            }, { timeout: 15000 });
-
-            const io = req.app.get('io');
-            await notifyOutlet(targetId, 'Stock Received', `Received ${transfers.length} item batches from Outlet ${outlet_id}`, 'stock_transfer', null, io);
-            await notifyAdmins('Outlet Stock Transferred', `${transfers.length} item batches transferred between outlets.`, 'stock_transfer', null, io);
-
-            return res.json({ success: true, message: 'Stock transferred successfully.', transfers });
-        }
-
-        // --- Standard OTP Flow for Delivery Officers ---
         let recipientIdentifier = '';
         let recipientPhone = '';
+        let recipientName = '';
         let doUser = null;
+        let targetOutlet = null;
 
-        if (to_type === 'Delivery Officer') {
-            doUser = await prisma.user.findFirst({
-                where: { id: targetId, role_id: 2 }
-            });
+        if (to_type === 'Outlet') {
+            targetOutlet = await prisma.outlet.findUnique({ where: { id: targetId } });
+            if (!targetOutlet) return res.status(404).json({ success: false, message: 'Target outlet not found.' });
+            if (targetOutlet.id === outlet_id) return res.status(400).json({ success: false, message: 'Cannot transfer to same outlet.' });
+            recipientIdentifier = `outlet_${targetId}`;
+            recipientName = targetOutlet.name;
+            // Assuming outlets have a contact phone or we use a manager's phone. 
+            // For now, let's look for any user in that outlet to get a phone number for WATI if needed.
+            const outletManager = await prisma.user.findFirst({ where: { outlet_id: targetId, role_id: 4 } }); // Role 4 = Outlet Manager?
+            recipientPhone = outletManager?.phone || outletManager?.whatsapp_number || '';
+        } else if (to_type === 'Delivery Officer') {
+            doUser = await prisma.user.findFirst({ where: { id: targetId, role_id: 2 } });
             if (!doUser) return res.status(404).json({ success: false, message: 'Delivery officer not found.' });
-            recipientIdentifier = `do_${doUser.id}`;
+            recipientIdentifier = `do_${targetId}`;
+            recipientName = doUser.full_name;
             recipientPhone = doUser.phone || doUser.whatsapp_number;
         } else {
             return res.status(400).json({ success: false, message: 'Invalid transfer type.' });
         }
 
-        // inventory_ids may be [{id, quantity}] objects OR plain integers — normalize both
+        // Normalize inventory IDs
         const rawIds = inventory_ids.map(i => typeof i === 'object' ? parseInt(i.id) : parseInt(i));
 
+        // Fetch items and mark as Pending Transfer
         const items = await prisma.outletInventory.findMany({
             where: { id: { in: rawIds }, outlet_id, status: 'In Stock' }
         });
@@ -396,70 +321,153 @@ const initiateStockTransfer = async (req, res) => {
         }
 
         const otp = Math.floor(10000 + Math.random() * 90000).toString();
-        
-        await prisma.otp.create({
-            data: {
-                phone: recipientIdentifier,
-                otp,
-                purpose: 'stock_transfer',
-                expiresAt: new Date(Date.now() + 15 * 60000)
-            }
-        });
 
-        // Dispatch OTP
-        if (to_type === 'Delivery Officer') {
-            const message = `Your Stock Transfer OTP is: ${otp}`;
-            console.log(`[initiateStockTransfer] Delivery Officer detected. to_id=${to_id}, otp=${otp}`);
-
-            // Save to dedicated OtpLog table
-             const otpLog = await prisma.otpLog.create({
+        const result = await prisma.$transaction(async (tx) => {
+            // 1. Create OTP
+            await tx.otp.create({
                 data: {
-                    user_id: parseInt(to_id),
-                    action: "stock_transfer_otp",
-                    message,
-                    otp
+                    phone: recipientIdentifier,
+                    otp,
+                    purpose: 'stock_transfer',
+                    expiresAt: new Date(Date.now() + 15 * 60000)
                 }
             });
-            console.log(`[initiateStockTransfer] OtpLog created: id=${otpLog.id}`);
 
-            const io = req.app.get('io');
-            if (io) {
-                const room = `user_${to_id}`;
-                const sockets = await io.in(room).fetchSockets();
-                console.log(`[initiateStockTransfer] Emitting to room "${room}" - ${sockets.length} connected socket(s)`);
-                io.to(room).emit('stock_transfer_otp', {
-                    otp_log_id: otpLog.id,
-                    action: otpLog.action,
-                    message: otpLog.message,
-                    otp,
-                    created_at: otpLog.created_at
+            const transferRecordsToCreate = [];
+
+            // 2. Process each item (with row splitting if needed)
+            for (const payloadItem of inventory_ids) {
+                const recordId = typeof payloadItem === 'object' ? parseInt(payloadItem.id) : parseInt(payloadItem);
+                const requestedQty = typeof payloadItem === 'object' ? (parseInt(payloadItem.quantity) || 1) : 1;
+
+                const item = await tx.outletInventory.findUnique({
+                    where: { id: recordId, outlet_id, status: 'In Stock' }
                 });
-                console.log(`[initiateStockTransfer] ✅ stock_transfer_otp emitted to ${room}`);
-            } else {
-                console.warn(`[initiateStockTransfer] ⚠️ io is not available on req.app`);
+
+                if (!item || item.quantity < requestedQty) {
+                    throw new Error(`Item ${recordId} not found or insufficient quantity.`);
+                }
+
+                let finalInventoryId = item.id;
+
+                if (requestedQty < item.quantity) {
+                    // SPLIT ROW: Create a new row for the pending transfer
+                    const newPendingRow = await tx.outletInventory.create({
+                        data: {
+                            outlet_id: item.outlet_id,
+                            product_name: item.product_name,
+                            category: item.category,
+                            imei_serial: item.imei_serial,
+                            purchase_price: item.purchase_price,
+                            installment_price: item.installment_price,
+                            status: 'Pending Transfer',
+                            color_variant: item.color_variant,
+                            quantity: requestedQty,
+                            installment_plans: item.installment_plans
+                        }
+                    });
+
+                    // Update original row (reduce quantity)
+                    await tx.outletInventory.update({
+                        where: { id: item.id },
+                        data: { quantity: item.quantity - requestedQty }
+                    });
+
+                    finalInventoryId = newPendingRow.id;
+                } else {
+                    // FULL ROW: Just mark as Pending Transfer
+                    await tx.outletInventory.update({
+                        where: { id: item.id },
+                        data: { status: 'Pending Transfer' }
+                    });
+                }
+
+                transferRecordsToCreate.push({
+                    from_type: 'Outlet',
+                    from_id: outlet_id,
+                    to_type,
+                    to_id: targetId,
+                    inventory_id: finalInventoryId,
+                    quantity_transferred: requestedQty,
+                    status: 'pending'
+                });
             }
 
-            await sendStockTransferOTPNotification(doUser, otp, 'Delivery Officer', io);
-        } else {
-    
-            // Outlet to Outlet still uses WATI
-            if (recipientPhone) {
-                await sendOTP(recipientPhone, otp).catch(e => console.error('WATI OTP Error:', e));
-            }
-        }
+            // 3. Create StockTransfer records
+            await tx.stockTransfer.createMany({ data: transferRecordsToCreate });
 
-        res.json({ success: true, message: `OTP sent successfully to ${to_type}.` });
-    } catch (error) {
-        const isValidationError = error.message.includes('exists in stock') || error.message.includes('not found') || error.message.includes('not in stock');
-        if (!isValidationError) {
-            console.error('initiateStockTransfer error:', error);
-        }
-        res.status(isValidationError ? 400 : 500).json({ 
-            success: false, 
-            message: error.message || 'Internal server error' 
+            return { otp };
         });
+
+        // Notifications & Sockets
+        const io = req.app.get('io');
+        const message = `Stock Transfer OTP: ${otp}. From Outlet ${outlet_id} to ${to_type} ${recipientName}`;
+        
+        // Log OTP
+        await prisma.otpLog.create({
+            data: {
+                user_id: to_type === 'Delivery Officer' ? parseInt(targetId) : req.user.id,
+                action: "stock_transfer_otp",
+                message,
+                otp
+            }
+        });
+
+        if (io) {
+            // Notify Receiver
+            const receiverRoom = to_type === 'Delivery Officer' ? `user_${targetId}` : `outlet_${targetId}`;
+            io.to(receiverRoom).emit('stock_transfer_initiated', {
+                from_id: outlet_id,
+                from_name: req.user.outlet_name || `Outlet ${outlet_id}`,
+                items_count: items.length,
+                items: items.map(i => ({ name: i.product_name, imei: i.imei_serial })),
+                otp: otp, // Sending OTP via socket for the popup
+                to_type
+            });
+
+            // Notify Sender
+            const senderRoom = `outlet_${outlet_id}`;
+            io.to(senderRoom).emit('stock_transfer_status', {
+                status: 'initiated',
+                to_name: recipientName,
+                items_count: rawIds.length
+            });
+
+            // Specific event for Mobile App (Delivery Officer)
+            if (to_type === 'Delivery Officer') {
+                const appRoom = `user_${targetId}`;
+                io.to(appRoom).emit('stock_transfer_otp', {
+                    action: "stock_transfer_otp",
+                    message,
+                    otp,
+                    created_at: new Date()
+                });
+            }
+        }
+
+        // Send OTP via external services if available
+        if (recipientPhone) {
+            await sendOTP(recipientPhone, otp).catch(e => console.error('OTP Service Error:', e));
+        }
+
+        // Send FCM Notification for Mobile App (pass null for io to avoid duplicate socket event)
+        const recipientUser = to_type === 'Delivery Officer' ? doUser : 
+            await prisma.user.findFirst({ where: { outlet_id: targetId, role_id: 4 } });
+        
+        if (recipientUser) {
+            await sendStockTransferOTPNotification(recipientUser, otp, to_type, null).catch(e => console.error('FCM Notification Error:', e));
+        }
+
+        const itemsDetail = items.map(i => `${i.product_name} (${i.imei_serial || 'No IMEI'})`).join(', ');
+        await logAction(req, 'STOCK_TRANSFER_INITIATED', `Initiated transfer of items to ${to_type} ${recipientName}: ${itemsDetail}`, null, 'Inventory');
+
+        res.json({ success: true, message: `OTP sent successfully to ${to_type}.`, otp_sent: true });
+    } catch (error) {
+        console.error('initiateStockTransfer error:', error);
+        res.status(500).json({ success: false, message: error.message || 'Internal server error' });
     }
 };
+
 
 const verifyStockTransfer = async (req, res) => {
     const { outlet_id, outlet_name } = req.user;
@@ -482,16 +490,16 @@ const verifyStockTransfer = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
         }
 
-        // The new frontend payload should pass inventory_ids as an array of objects: [{ id: 5, quantity: 2 }, ...]
-        // We will extract just the IDs to fetch the raw items
+        // Normalize inventory IDs
         const rawIds = inventory_ids.map(i => typeof i === 'object' ? i.id : i);
 
+        // Fetch items that are in 'Pending Transfer' status at the origin outlet
         const items = await prisma.outletInventory.findMany({
-            where: { id: { in: rawIds }, outlet_id, status: 'In Stock' }
+            where: { id: { in: rawIds }, outlet_id, status: 'Pending Transfer' }
         });
 
         if (items.length !== rawIds.length) {
-            return res.status(400).json({ success: false, message: 'Some items could not be found or are not in stock.' });
+            return res.status(400).json({ success: false, message: 'Some items could not be found or are not in pending transfer status.' });
         }
 
         // Process transfers
@@ -505,87 +513,79 @@ const verifyStockTransfer = async (req, res) => {
                 const item = items.find(i => i.id === recordId);
                 if (!item) continue;
 
-                let finalInventoryId = item.id;
                 let isFullTransfer = (item.quantity <= transferQty);
                 let actualTransferQty = isFullTransfer ? item.quantity : transferQty;
 
-                let targetPayload = { 
-                    status: 'Out Of Stock',
-                    imei_serial: item.imei_serial || payloadItem.imei_serial || null,
-                    color_variant: item.color_variant || payloadItem.color_variant || null
-                }; 
                 if (to_type === 'Outlet') {
-                    targetPayload = { 
-                        status: 'In Stock', 
-                        outlet_id: targetId,
-                        imei_serial: item.imei_serial || payloadItem.imei_serial || null,
-                        color_variant: item.color_variant || payloadItem.color_variant || null
-                    };
-                }
-
-                if (isFullTransfer) {
-                    await tx.outletInventory.update({
-                        where: { id: item.id },
-                        data: targetPayload
-                    });
-                } else {
-                    // Split the row! Keep original at original outlet with reduced Qty
-                    await tx.outletInventory.update({
-                        where: { id: item.id },
-                        data: { quantity: item.quantity - actualTransferQty }
-                    });
-
-                    // Merge or create for the Target Outlet
-                    const targetOutletId = (to_type === 'Outlet') ? targetId : outlet_id;
-                    const existingAtTarget = await tx.outletInventory.findFirst({
-                        where: {
-                            outlet_id: targetOutletId,
-                            product_name: item.product_name,
-                            status: 'In Stock'
-                        }
-                    });
-
-                    if (existingAtTarget) {
-                        const updated = await tx.outletInventory.update({
-                            where: { id: existingAtTarget.id },
-                            data: {
-                                quantity: existingAtTarget.quantity + actualTransferQty,
-                                status: 'In Stock'
-                            }
+                    if (isFullTransfer) {
+                        // Full row moves to target outlet
+                        await tx.outletInventory.update({
+                            where: { id: item.id },
+                            data: { outlet_id: targetId, status: 'In Stock' }
                         });
-                        finalInventoryId = updated.id;
                     } else {
-                        const cloned = await tx.outletInventory.create({
-                            data: {
-                                outlet_id: targetOutletId,
-                                product_name: item.product_name,
-                                category: item.category,
-                                imei_serial: item.imei_serial || payloadItem.imei_serial || null,
-                                color_variant: item.color_variant || payloadItem.color_variant || null,
-                                quantity: actualTransferQty,
-                                purchase_price: item.purchase_price,
-                                installment_price: item.installment_price,
-                                status: 'In Stock'
-                            }
+                        // Split row: Original stays at origin with reduced Qty, new row created at target
+                        await tx.outletInventory.update({
+                            where: { id: item.id },
+                            data: { quantity: item.quantity - actualTransferQty, status: 'In Stock' }
                         });
-                        finalInventoryId = cloned.id;
+
+                        const existingAtTarget = await tx.outletInventory.findFirst({
+                            where: { outlet_id: targetId, product_name: item.product_name, status: 'In Stock' }
+                        });
+
+                        if (existingAtTarget) {
+                            await tx.outletInventory.update({
+                                where: { id: existingAtTarget.id },
+                                data: { quantity: existingAtTarget.quantity + actualTransferQty }
+                            });
+                        } else {
+                            await tx.outletInventory.create({
+                                data: {
+                                    outlet_id: targetId,
+                                    product_name: item.product_name,
+                                    category: item.category,
+                                    imei_serial: item.imei_serial || null,
+                                    color_variant: item.color_variant || null,
+                                    quantity: actualTransferQty,
+                                    purchase_price: item.purchase_price,
+                                    installment_price: item.installment_price,
+                                    status: 'In Stock'
+                                }
+                            });
+                        }
+                    }
+                } else {
+                    // Delivery Officer: Row stays at origin but marked 'Out Of Stock' or stays 'Pending'?
+                    // Actually for DO, it stays 'Out Of Stock' as it leaves the outlet.
+                    if (isFullTransfer) {
+                        await tx.outletInventory.update({
+                            where: { id: item.id },
+                            data: { status: 'Out Of Stock' }
+                        });
+                    } else {
+                        await tx.outletInventory.update({
+                            where: { id: item.id },
+                            data: { quantity: item.quantity - actualTransferQty, status: 'In Stock' }
+                        });
+                        // We might need to create a record of what the DO is carrying, but currently DO inventory isn't explicitly tracked in rows.
+                        // It's tracked via StockTransfer and Order status.
                     }
                 }
 
-                transferData.push({
-                    from_type: 'Outlet',
-                    from_id: outlet_id,
-                    to_type,
-                    to_id: targetId,
-                    inventory_id: finalInventoryId,
-                    quantity_transferred: actualTransferQty
+                // Update StockTransfer record status to 'delivered'
+                await tx.stockTransfer.updateMany({
+                    where: { 
+                        inventory_id: item.id, 
+                        from_id: outlet_id, 
+                        to_id: targetId, 
+                        status: 'pending' 
+                    },
+                    data: { status: 'transferred' }
                 });
-            }
 
-            // Bulk create transfer records
-            await tx.stockTransfer.createMany({
-                data: transferData
-            });
+                transferData.push({ id: item.id, qty: actualTransferQty });
+            }
 
             // Mark OTP as used
             await tx.otp.update({
@@ -597,29 +597,35 @@ const verifyStockTransfer = async (req, res) => {
         }, { timeout: 15000 }); 
 
         // Notifications
-        const messageTitle = 'Stock Transfer Received';
-        const messageBody = `You have received a transfer of ${transfers.length} item entry(s) from Outlet ${outlet_id}.`;
         const io = req.app.get('io');
+        const messageTitle = 'Stock Transfer Completed';
+        const messageBody = `Transfer of ${transfers.length} item batch(es) from Outlet ${outlet_id} to ${to_type} ${targetId} has been verified.`;
 
-        if (to_type === 'Delivery Officer') {
-            await notifyUser(targetId, messageTitle, messageBody, 'stock_transfer', null, io);
-        } else if (to_type === 'Outlet') {
-            await notifyOutlet(targetId, messageTitle, messageBody, 'stock_transfer', null, io);
+        if (io) {
+            const receiverRoom = to_type === 'Delivery Officer' ? `user_${targetId}` : `outlet_${targetId}`;
+            const senderRoom = `outlet_${outlet_id}`;
+            
+            io.to(receiverRoom).emit('stock_transfer_completed', { 
+                message: 'Stock transferred successfully. Your inventory has been updated.', 
+                from_id: outlet_id 
+            });
+            io.to(senderRoom).emit('stock_transfer_status', { status: 'completed', to_id: targetId, to_type });
         }
 
-        // Notify Admins mapping (dashboard global alerts)
-        await notifyAdmins('Outlet Stock Transferred', `${transfers.length} item batches transferred from Outlet ${outlet_id} to ${to_type} ${targetId}`, 'stock_transfer', null, io);
+        const itemsDetail = items.map(i => `${i.product_name} (${i.imei_serial || 'No IMEI'})`).join(', ');
+        await logAction(req, 'STOCK_TRANSFER_VERIFIED', `Verified transfer of items to ${to_type} ${targetId}: ${itemsDetail}`, null, 'Inventory');
 
         res.json({ success: true, transfers });
     } catch (error) {
         console.error('verifyStockTransfer error:', error);
-        res.status(500).json({ success: false, message: 'Internal server error' });
+        res.status(500).json({ success: false, message: error.message || 'Internal server error' });
     }
 };
 
+
 const getTransferHistory = async (req, res) => {
     const { outlet_id } = req.user;
-    const { page = 1, limit = 20, search = "", to_type, startDate, endDate } = req.query;
+    const { page = 1, limit = 20, search = "", to_type, startDate, endDate, direction = 'sent', status } = req.query;
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const take = parseInt(limit);
 
@@ -629,9 +635,11 @@ const getTransferHistory = async (req, res) => {
 
     try {
         const where = { 
-            from_type: 'Outlet', 
-            from_id: outlet_id,
-            to_type: to_type || undefined,
+            from_type: direction === 'sent' ? 'Outlet' : undefined, 
+            from_id: direction === 'sent' ? outlet_id : undefined,
+            to_type: direction === 'received' ? 'Outlet' : (to_type || undefined),
+            to_id: direction === 'received' ? outlet_id : undefined,
+            status: status || undefined,
             created_at: (startDate || endDate) ? {
                 gte: startDate ? new Date(startDate) : undefined,
                 lte: endDate ? new Date(endDate) : undefined
@@ -666,11 +674,12 @@ const getTransferHistory = async (req, res) => {
             prisma.stockTransfer.count({ where })
         ]);
 
-        // Map to_id to human readable names
+        // Map IDs to human readable names
         const deliveryToIds = [...new Set(transfers.filter(t => t.to_type === 'Delivery Officer').map(t => t.to_id))];
         const outletToIds = [...new Set(transfers.filter(t => t.to_type === 'Outlet').map(t => t.to_id))];
+        const outletFromIds = [...new Set(transfers.filter(t => t.from_type === 'Outlet').map(t => t.from_id))];
 
-        const [deliveryOfficers, outlets] = await Promise.all([
+        const [deliveryOfficers, targetOutlets, sourceOutlets] = await Promise.all([
             prisma.user.findMany({
                 where: { id: { in: deliveryToIds } },
                 select: { id: true, full_name: true, username: true }
@@ -678,22 +687,34 @@ const getTransferHistory = async (req, res) => {
             prisma.outlet.findMany({
                 where: { id: { in: outletToIds } },
                 select: { id: true, name: true, address: true }
+            }),
+            prisma.outlet.findMany({
+                where: { id: { in: outletFromIds } },
+                select: { id: true, name: true, address: true }
             })
         ]);
 
         const mappedTransfers = transfers.map(t => {
             let recipientName = 'Unknown';
+            let senderName = 'Unknown';
+
             if (t.to_type === 'Delivery Officer') {
                 const off = deliveryOfficers.find(o => o.id === t.to_id);
                 if (off) recipientName = `${off.full_name} (${off.username})`;
             } else if (t.to_type === 'Outlet') {
-                const out = outlets.find(o => o.id === t.to_id);
+                const out = targetOutlets.find(o => o.id === t.to_id);
                 if (out) recipientName = `${out.name} (${out.address || 'No Address'})`;
+            }
+
+            if (t.from_type === 'Outlet') {
+                const out = sourceOutlets.find(o => o.id === t.from_id);
+                if (out) senderName = out.name;
             }
 
             return {
                 ...t,
-                recipient_name: recipientName
+                recipient_name: recipientName,
+                sender_name: senderName
             };
         });
 
@@ -713,6 +734,7 @@ const getTransferHistory = async (req, res) => {
         res.status(500).json({ success: false, message: 'Internal server error' });
     }
 };
+
 
 const updateInventoryItem = async (req, res) => {
     const { outlet_id } = req.user;
@@ -811,15 +833,205 @@ const bulkDeleteInventory = async (req, res) => {
     }
 };
 
+const cancelStockTransfer = async (req, res) => {
+    const { outlet_id } = req.user;
+    const { transfer_ids, reason } = req.body;
+
+    if (!outlet_id || !transfer_ids || !Array.isArray(transfer_ids)) {
+        return res.status(400).json({ success: false, message: 'Missing transfer IDs.' });
+    }
+
+    try {
+        const transfers = await prisma.stockTransfer.findMany({
+            where: { id: { in: transfer_ids }, from_id: outlet_id, status: 'pending' },
+            include: { inventory: true }
+        });
+
+        if (transfers.length === 0) {
+            return res.status(404).json({ success: false, message: 'No pending transfers found for these IDs.' });
+        }
+
+        const inventoryIds = transfers.map(t => t.inventory_id);
+
+        await prisma.$transaction(async (tx) => {
+            // 1. Update StockTransfer status
+            await tx.stockTransfer.updateMany({
+                where: { id: { in: transfers.map(t => t.id) } },
+                data: { status: 'cancelled' }
+            });
+
+            // 2. Revert inventory status
+            // Note: We process each inventory item to ensure status is reverted
+            for (const t of transfers) {
+                const inv = await tx.outletInventory.findUnique({ where: { id: t.inventory_id } });
+                if (inv && inv.status === 'Pending Transfer') {
+                    // Check if there's an existing 'In Stock' row for the same item to merge back into
+                    // To keep it simple and safe, we just set the status back to 'In Stock'
+                    await tx.outletInventory.update({
+                        where: { id: inv.id },
+                        data: { status: 'In Stock' }
+                    });
+                }
+            }
+        });
+
+        const io = req.app.get('io');
+        if (io) {
+            transfers.forEach(t => {
+                const receiverRoom = t.to_type === 'Delivery Officer' ? `user_${t.to_id}` : `outlet_${t.to_id}`;
+                io.to(receiverRoom).emit('stock_transfer_cancelled', { transfer_id: t.id, reason });
+            });
+        }
+
+        const itemsDetail = transfers.map(t => `${t.inventory?.product_name || 'Item'} (${t.inventory?.imei_serial || 'No IMEI'})`).join(', ');
+        await logAction(req, 'STOCK_TRANSFER_CANCELLED', `Cancelled transfer of items: ${itemsDetail}. Reason: ${reason || 'N/A'}`, null, 'Inventory');
+
+        res.json({ success: true, message: 'Transfers cancelled successfully.' });
+    } catch (error) {
+        console.error('cancelStockTransfer error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const resendStockTransferOTP = async (req, res) => {
+    const { outlet_id } = req.user;
+    const { to_id, to_type, transfer_ids } = req.body;
+
+    if (!outlet_id || !to_id || !to_type) {
+        return res.status(400).json({ success: false, message: 'Missing fields.' });
+    }
+
+    try {
+        const targetId = parseInt(to_id);
+        const recipientIdentifier = to_type === 'Outlet' ? `outlet_${targetId}` : `do_${targetId}`;
+        
+        // Find recipient phone
+        let recipientPhone = '';
+        if (to_type === 'Outlet') {
+            const manager = await prisma.user.findFirst({ where: { outlet_id: targetId, role_id: 4 } });
+            recipientPhone = manager?.phone || manager?.whatsapp_number || '';
+        } else {
+            const user = await prisma.user.findUnique({ where: { id: targetId } });
+            recipientPhone = user?.phone || user?.whatsapp_number || '';
+        }
+
+        const otp = Math.floor(10000 + Math.random() * 90000).toString();
+
+        await prisma.otp.create({
+            data: {
+                phone: recipientIdentifier,
+                otp,
+                purpose: 'stock_transfer',
+                expiresAt: new Date(Date.now() + 15 * 60000)
+            }
+        });
+
+        // Log OTP
+        await prisma.otpLog.create({
+            data: {
+                user_id: to_type === 'Delivery Officer' ? parseInt(targetId) : req.user.id,
+                action: "stock_transfer_otp_resend",
+                message: `Stock Transfer OTP Resent: ${otp}. To ${to_type} ${targetId}`,
+                otp
+            }
+        });
+
+        const pendingTransfers = await prisma.stockTransfer.findMany({
+            where: { 
+                from_id: outlet_id, 
+                to_id: targetId, 
+                to_type, 
+                status: 'pending',
+                id: (transfer_ids && Array.isArray(transfer_ids)) ? { in: transfer_ids.map(id => parseInt(id)) } : undefined
+            },
+            include: { inventory: true }
+        });
+
+        // Notifications & Sockets
+        const io = req.app.get('io');
+        if (io) {
+            const receiverRoom = to_type === 'Delivery Officer' ? `user_${targetId}` : `outlet_${targetId}`;
+            io.to(receiverRoom).emit('stock_transfer_initiated', {
+                from_id: outlet_id,
+                from_name: req.user.outlet_name || `Outlet ${outlet_id}`,
+                otp: otp,
+                to_type,
+                items_count: pendingTransfers.length,
+                items: pendingTransfers.map(t => ({ name: t.inventory.product_name, imei: t.inventory.imei_serial })),
+                is_resend: true
+            });
+
+            // Specific event for Mobile App (Resend)
+            if (to_type === 'Delivery Officer') {
+                const appRoom = `user_${targetId}`;
+                io.to(appRoom).emit('stock_transfer_otp', {
+                    action: "stock_transfer_otp_resend",
+                    message: `Your Stock Transfer OTP has been resent: ${otp}`,
+                    otp,
+                    created_at: new Date()
+                });
+            }
+        }
+
+        if (recipientPhone) {
+            const resendMessage = `Your Stock Transfer OTP has been resent: ${otp}. Please share this with the sender.`;
+            await sendOTP(recipientPhone, otp, resendMessage).catch(e => console.error('OTP Service Error:', e));
+        }
+
+        // Send FCM Notification for Mobile App (Resend) - pass null for io to avoid duplicate socket event
+        const recipientUser = to_type === 'Delivery Officer' ? 
+            await prisma.user.findUnique({ where: { id: targetId } }) : 
+            await prisma.user.findFirst({ where: { outlet_id: targetId, role_id: 4 } });
+        
+        if (recipientUser) {
+            await sendStockTransferOTPNotification(recipientUser, otp, to_type, null).catch(e => console.error('FCM Resend Notification Error:', e));
+        }
+
+        res.json({ success: true, message: 'OTP resent successfully.' });
+    } catch (error) {
+        console.error('resendStockTransferOTP error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const requestStockTransfer = async (req, res) => {
+    const { outlet_id, outlet_name } = req.user;
+    const { from_id } = req.body; // Origin outlet id
+
+    if (!outlet_id || !from_id) {
+        return res.status(400).json({ success: false, message: 'Missing fields.' });
+    }
+
+    try {
+        const io = req.app.get('io');
+        if (io) {
+            const originRoom = `outlet_${from_id}`;
+            io.to(originRoom).emit('stock_transfer_request', {
+                requested_by_id: outlet_id,
+                requested_by_name: outlet_name || `Outlet ${outlet_id}`
+            });
+        }
+
+        res.json({ success: true, message: 'Transfer request sent to origin outlet.' });
+    } catch (error) {
+        console.error('requestStockTransfer error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
 module.exports = {
     getInventory,
     addInventory,
     initiateStockTransfer,
     verifyStockTransfer,
     getTransferHistory,
+    cancelStockTransfer,
+    resendStockTransferOTP,
+    requestStockTransfer,
     updateInventoryItem,
     deleteInventoryItem,
     bulkUpdateInventory,
     bulkDeleteInventory,
     generateInstallments
 };
+

@@ -364,6 +364,17 @@ const verifyCashSubmissionOTP = async (req, res) => {
         // Update Cash Register
         await updateCashRegister(null, parseInt(outlet_id), 'cash_from_delivery', totalAmount, 'add');
 
+        // Notify the Delivery Officer
+        if (histories.length > 0) {
+            const officerId = histories[0].cash_in_hand.officer_id;
+            const io = req.app.get('io');
+            if (io && officerId) {
+                io.to(`user_${officerId}`).emit('cash_submission_completed', {
+                    message: 'Cash submission verified and marked as paid successfully.',
+                });
+            }
+        }
+
         return res.status(200).json({
             success: true,
             message: 'Cash submission verified and marked as paid successfully'

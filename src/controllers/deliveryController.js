@@ -1210,7 +1210,11 @@ const getDeliveryBoyInventory = async (req, res) => {
     const deliveryBoyId = req.user.id;
 
     const transfers = await prisma.stockTransfer.findMany({
-      where: { to_type: 'Delivery Officer', to_id: deliveryBoyId, status: 'pending' },
+      where: { 
+        to_type: 'Delivery Officer', 
+        to_id: deliveryBoyId, 
+        status: { in: ['transferred', 'delivered'] }
+      },
       include: {
         inventory: {
           select: {

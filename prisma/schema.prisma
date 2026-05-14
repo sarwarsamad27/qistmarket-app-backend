@@ -111,7 +111,7 @@ model Order {
   channel                  String
   status                   String                @default("new")
   created_at               DateTime              @default(now())
-  updated_at               DateTime              @updatedAt
+  updated_at               DateTime              @default(now())
   created_by_user_id       Int?
   assigned_to_user_id      Int?
   delivery_officer_id      Int?

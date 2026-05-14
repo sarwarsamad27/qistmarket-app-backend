@@ -1435,14 +1435,16 @@ const getMyDeliveryOrdersWithPagination = async (req, res) => {
     });
 
     const where = { ...baseWhere };
-    if (cursorId > 0) {
-      where.id = { gt: cursorId };
-    }
 
     const orders = await prisma.order.findMany({
       where,
       take,
-      orderBy: { id: 'desc' },
+      skip: cursorId > 0 ? 1 : 0,
+      cursor: cursorId > 0 ? { id: cursorId } : undefined,
+      orderBy: [
+        { updated_at: 'desc' },
+        { id: 'desc' }
+      ],
       include: {
         created_by: {
           select: {
