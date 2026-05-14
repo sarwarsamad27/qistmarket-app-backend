@@ -1,7 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 
-const uploadsBaseUrl = `http://localhost:5000/uploads`;
+const uploadsBaseUrl = `https://app.qistmarket.pk/uploads`;
 
 module.exports = async (req, res, next) => {
   try {
