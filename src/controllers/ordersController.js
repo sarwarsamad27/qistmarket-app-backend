@@ -1234,6 +1234,10 @@ const getCsrDashboardStats = async (req, res) => {
       cancelled: calcIncrement(cancelledCount, yesterdayCounts['cancelled']),
       expired: calcIncrement(expiredCount, yesterdayCounts['expired']),
       sales: calcIncrement(achievedAmount, yesterdaySales),
+      in_progress: calcIncrement(inProgressCount, yesterdayCounts['in_progress']),
+      picked: calcIncrement(pickedCount, yesterdayCounts['picked']),
+      completed: calcIncrement(completedCount, yesterdayCounts['completed']),
+      rejected: calcIncrement(rejectedCount, yesterdayCounts['rejected']),
     };
 
     // Calculate overall Success Rate increment (vs yesterday)
