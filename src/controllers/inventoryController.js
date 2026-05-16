@@ -6,41 +6,41 @@ const axios = require('axios');
 const admin = require('firebase-admin');
 
 if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert({
-      projectId: process.env.FIREBASE_PROJECT_ID,
-      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
-    }),
-  });
+    admin.initializeApp({
+        credential: admin.credential.cert({
+            projectId: process.env.FIREBASE_PROJECT_ID,
+            clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+            privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+        }),
+    });
 }
 
 // ─── Stock Transfer OTP Notification Helper ──────────────────────────────────
 
 async function sendStockTransferOTPNotification(user, otp, recipientType, io = null) {
-  const title = 'Stock Transfer OTP';
-  const message = `Your Stock Transfer OTP is: ${otp}`;
-  const notificationType = 'stock_transfer_otp';
-  
-  if (user?.id) {
-    await notifyUser(user.id, title, message, notificationType, null, io);
-  }
+    const title = 'Stock Transfer OTP';
+    const message = `Your Stock Transfer OTP is: ${otp}`;
+    const notificationType = 'stock_transfer_otp';
 
-  if (!user?.fcm_token) return;
+    if (user?.id) {
+        await notifyUser(user.id, title, message, notificationType, null, io);
+    }
 
-  try {
-    await admin.messaging().send({
-      token: user.fcm_token,
-      notification: { title, body: message },
-      data: {
-        type: notificationType,
-        otp: otp,
-        recipient_type: recipientType,
-      },
-    });
-  } catch (fcmError) {
-    console.error('FCM send failed for transfer OTP:', fcmError);
-  }
+    if (!user?.fcm_token) return;
+
+    try {
+        await admin.messaging().send({
+            token: user.fcm_token,
+            notification: { title, body: message },
+            data: {
+                type: notificationType,
+                otp: otp,
+                recipient_type: recipientType,
+            },
+        });
+    } catch (fcmError) {
+        console.error('FCM send failed for transfer OTP:', fcmError);
+    }
 }
 
 
@@ -174,8 +174,8 @@ const getInventory = async (req, res) => {
             })
         ]);
 
-        res.json({ 
-            success: true, 
+        res.json({
+            success: true,
             inventory, // Frontend will group these by product_name
             stats: {
                 totalStock: totalUniqueProducts.length || 0,
@@ -217,24 +217,24 @@ const addInventory = async (req, res) => {
             }
 
             const purchasePriceNum = parseFloat(purchase_price);
-            
+
             // Check for duplicate IMEI system-wide
             if (imei_serial && imei_serial.trim() !== '') {
                 const duplicate = await prisma.outletInventory.findFirst({
                     where: { imei_serial: imei_serial.trim() }
                 });
                 if (duplicate) {
-                    return res.status(400).json({ 
-                        success: false, 
-                        message: `IMEI/Serial ${imei_serial} already exists.` 
+                    return res.status(400).json({
+                        success: false,
+                        message: `IMEI/Serial ${imei_serial} already exists.`
                     });
                 }
             }
 
             // If installment_plans are provided in the request (from external API), use them.
             // Otherwise, generate new ones.
-            const instPlans = (installment_plans && Array.isArray(installment_plans)) 
-                ? installment_plans 
+            const instPlans = (installment_plans && Array.isArray(installment_plans))
+                ? installment_plans
                 : generateInstallments(category || '', purchasePriceNum);
 
             const created = await prisma.outletInventory.create({
@@ -246,7 +246,7 @@ const addInventory = async (req, res) => {
                     color_variant: color_variant || null,
                     quantity: parseInt(quantity) || 1,
                     purchase_price: purchasePriceNum,
-                    installment_price: 0, 
+                    installment_price: 0,
                     installment_plans: instPlans,
                     status: status || 'In Stock'
                 }
@@ -256,8 +256,8 @@ const addInventory = async (req, res) => {
 
         if (createdItems.length > 0) {
             await logAction(
-                req, 
-                'STOCK_ADDITION', 
+                req,
+                'STOCK_ADDITION',
                 `Added ${createdItems.length} items to inventory. (First item: ${createdItems[0].product_name})`,
                 createdItems[0].id,
                 'Inventory'
@@ -402,7 +402,7 @@ const initiateStockTransfer = async (req, res) => {
         // Notifications & Sockets
         const io = req.app.get('io');
         const message = `Stock Transfer OTP: ${otp}. From Outlet ${outlet_id} to ${to_type} ${recipientName}`;
-        
+
         // Log OTP
         await prisma.otpLog.create({
             data: {
@@ -451,9 +451,9 @@ const initiateStockTransfer = async (req, res) => {
         }
 
         // Send FCM Notification for Mobile App (pass null for io to avoid duplicate socket event)
-        const recipientUser = to_type === 'Delivery Officer' ? doUser : 
+        const recipientUser = to_type === 'Delivery Officer' ? doUser :
             await prisma.user.findFirst({ where: { outlet_id: targetId, role_id: 4 } });
-        
+
         if (recipientUser) {
             await sendStockTransferOTPNotification(recipientUser, otp, to_type, null).catch(e => console.error('FCM Notification Error:', e));
         }
@@ -505,7 +505,7 @@ const verifyStockTransfer = async (req, res) => {
         // Process transfers
         const transfers = await prisma.$transaction(async (tx) => {
             const transferData = [];
-            
+
             for (const payloadItem of inventory_ids) {
                 const recordId = typeof payloadItem === 'object' ? payloadItem.id : payloadItem;
                 const transferQty = typeof payloadItem === 'object' ? (parseInt(payloadItem.quantity) || 1) : 1;
@@ -550,6 +550,9 @@ const verifyStockTransfer = async (req, res) => {
                                     quantity: actualTransferQty,
                                     purchase_price: item.purchase_price,
                                     installment_price: item.installment_price,
+                                    installment_plans: item.installment_plans || null,
+                                    sale_price: item.sale_price || null,
+                                    api_product_name: item.api_product_name || null,
                                     status: 'In Stock'
                                 }
                             });
@@ -575,11 +578,11 @@ const verifyStockTransfer = async (req, res) => {
 
                 // Update StockTransfer record status to 'delivered'
                 await tx.stockTransfer.updateMany({
-                    where: { 
-                        inventory_id: item.id, 
-                        from_id: outlet_id, 
-                        to_id: targetId, 
-                        status: 'pending' 
+                    where: {
+                        inventory_id: item.id,
+                        from_id: outlet_id,
+                        to_id: targetId,
+                        status: 'pending'
                     },
                     data: { status: 'transferred' }
                 });
@@ -593,8 +596,8 @@ const verifyStockTransfer = async (req, res) => {
                 data: { isUsed: true }
             });
 
-            return transferData; 
-        }, { timeout: 15000 }); 
+            return transferData;
+        }, { timeout: 15000 });
 
         // Notifications
         const io = req.app.get('io');
@@ -604,10 +607,10 @@ const verifyStockTransfer = async (req, res) => {
         if (io) {
             const receiverRoom = to_type === 'Delivery Officer' ? `user_${targetId}` : `outlet_${targetId}`;
             const senderRoom = `outlet_${outlet_id}`;
-            
-            io.to(receiverRoom).emit('stock_transfer_completed', { 
-                message: 'Stock transferred successfully. Your inventory has been updated.', 
-                from_id: outlet_id 
+
+            io.to(receiverRoom).emit('stock_transfer_completed', {
+                message: 'Stock transferred successfully. Your inventory has been updated.',
+                from_id: outlet_id
             });
             io.to(senderRoom).emit('stock_transfer_status', { status: 'completed', to_id: targetId, to_type });
         }
@@ -634,8 +637,8 @@ const getTransferHistory = async (req, res) => {
     }
 
     try {
-        const where = { 
-            from_type: direction === 'sent' ? 'Outlet' : undefined, 
+        const where = {
+            from_type: direction === 'sent' ? 'Outlet' : undefined,
             from_id: direction === 'sent' ? outlet_id : undefined,
             to_type: direction === 'received' ? 'Outlet' : (to_type || undefined),
             to_id: direction === 'received' ? outlet_id : undefined,
@@ -718,9 +721,9 @@ const getTransferHistory = async (req, res) => {
             };
         });
 
-        res.json({ 
-            success: true, 
-            count: mappedTransfers.length, 
+        res.json({
+            success: true,
+            count: mappedTransfers.length,
             transfers: mappedTransfers,
             pagination: {
                 total,
@@ -758,7 +761,7 @@ const updateInventoryItem = async (req, res) => {
         });
 
         if (updated.count === 0) return res.status(404).json({ success: false, message: 'Item not found' });
-        
+
         res.json({ success: true, message: 'Item updated successfully' });
     } catch (error) {
         console.error('Update item err:', error);
@@ -776,7 +779,7 @@ const deleteInventoryItem = async (req, res) => {
         });
 
         if (deleted.count === 0) return res.status(404).json({ success: false, message: 'Item not found' });
-        
+
         res.json({ success: true, message: 'Item deleted successfully' });
     } catch (error) {
         console.error('Delete item err:', error);
@@ -904,7 +907,7 @@ const resendStockTransferOTP = async (req, res) => {
     try {
         const targetId = parseInt(to_id);
         const recipientIdentifier = to_type === 'Outlet' ? `outlet_${targetId}` : `do_${targetId}`;
-        
+
         // Find recipient phone
         let recipientPhone = '';
         if (to_type === 'Outlet') {
@@ -937,10 +940,10 @@ const resendStockTransferOTP = async (req, res) => {
         });
 
         const pendingTransfers = await prisma.stockTransfer.findMany({
-            where: { 
-                from_id: outlet_id, 
-                to_id: targetId, 
-                to_type, 
+            where: {
+                from_id: outlet_id,
+                to_id: targetId,
+                to_type,
                 status: 'pending',
                 id: (transfer_ids && Array.isArray(transfer_ids)) ? { in: transfer_ids.map(id => parseInt(id)) } : undefined
             },
@@ -979,10 +982,10 @@ const resendStockTransferOTP = async (req, res) => {
         }
 
         // Send FCM Notification for Mobile App (Resend) - pass null for io to avoid duplicate socket event
-        const recipientUser = to_type === 'Delivery Officer' ? 
-            await prisma.user.findUnique({ where: { id: targetId } }) : 
+        const recipientUser = to_type === 'Delivery Officer' ?
+            await prisma.user.findUnique({ where: { id: targetId } }) :
             await prisma.user.findFirst({ where: { outlet_id: targetId, role_id: 4 } });
-        
+
         if (recipientUser) {
             await sendStockTransferOTPNotification(recipientUser, otp, to_type, null).catch(e => console.error('FCM Resend Notification Error:', e));
         }
@@ -994,27 +997,246 @@ const resendStockTransferOTP = async (req, res) => {
     }
 };
 
-const requestStockTransfer = async (req, res) => {
-    const { outlet_id, outlet_name } = req.user;
-    const { from_id } = req.body; // Origin outlet id
+const initiateStockBack = async (req, res) => {
+    const { transfer_id } = req.body;
+    const requesterId = req.user.id;
+    const requesterOutletId = req.user.outlet_id;
 
-    if (!outlet_id || !from_id) {
+    if (!transfer_id) {
+        return res.status(400).json({ success: false, message: 'Missing transfer ID.' });
+    }
+
+    try {
+        const transfer = await prisma.stockTransfer.findUnique({
+            where: { id: parseInt(transfer_id) },
+            include: { inventory: true }
+        });
+
+        if (!transfer) {
+            return res.status(404).json({ success: false, message: 'Transfer record not found.' });
+        }
+
+        if (transfer.status !== 'transferred' && transfer.status !== 'pending') {
+            return res.status(400).json({ success: false, message: `Cannot back stock in ${transfer.status} status.` });
+        }
+
+        // Determine Giver and Receiver for the Back action
+        // Original: from_id -> to_id
+        // Back: to_id -> from_id
+
+        // Receiver of the back transfer is the original sender (always an outlet currently)
+        const backReceiverId = transfer.from_id;
+        const backReceiverType = transfer.from_type; // 'Outlet'
+
+        // Giver of the back transfer is the original receiver
+        const backGiverId = transfer.to_id;
+        const backGiverType = transfer.to_type; // 'Outlet' or 'Delivery Officer'
+
+        // Check if requester is authorized (either original sender or original receiver)
+        const isAuthorized = (requesterOutletId === transfer.from_id) ||
+            (transfer.to_type === 'Outlet' && requesterOutletId === transfer.to_id) ||
+            (transfer.to_type === 'Delivery Officer' && requesterId === transfer.to_id);
+
+        if (!isAuthorized) {
+            return res.status(403).json({ success: false, message: 'Unauthorized to initiate stock back for this transfer.' });
+        }
+
+        const otp = Math.floor(10000 + Math.random() * 90000).toString();
+        const phoneKey = `back_${transfer.id}`;
+
+        await prisma.otp.create({
+            data: {
+                phone: phoneKey,
+                otp,
+                purpose: 'stock_back',
+                expiresAt: new Date(Date.now() + 10 * 60000)
+            }
+        });
+
+        // Notifications & Sockets
+        const io = req.app.get('io');
+        if (io) {
+            const giverRoom = backGiverType === 'Delivery Officer' ? `user_${backGiverId}` : `outlet_${backGiverId}`;
+            const receiverRoom = backReceiverType === 'Delivery Officer' ? `user_${backReceiverId}` : `outlet_${backReceiverId}`;
+
+            // Notify Receiver (Original Sender) - They get the OTP
+            io.to(receiverRoom).emit('stock_back_initiated', {
+                transfer_id: transfer.id,
+                otp: otp,
+                product_name: transfer.inventory?.product_name,
+                imei_serial: transfer.inventory?.imei_serial,
+                role: 'receiver'
+            });
+
+            // Notify Giver (Original Receiver) - They get the OTP input popup
+            io.to(giverRoom).emit('stock_back_initiated', {
+                transfer_id: transfer.id,
+                product_name: transfer.inventory?.product_name,
+                imei_serial: transfer.inventory?.imei_serial,
+                role: 'giver'
+            });
+        }
+
+        res.json({ success: true, message: 'Stock back initiated. OTP sent to the other party.' });
+    } catch (error) {
+        console.error('initiateStockBack error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const verifyStockBack = async (req, res) => {
+    const { transfer_id, otp } = req.body;
+
+    if (!transfer_id || !otp) {
         return res.status(400).json({ success: false, message: 'Missing fields.' });
     }
 
     try {
+        const transfer = await prisma.stockTransfer.findUnique({
+            where: { id: parseInt(transfer_id) },
+            include: { inventory: true }
+        });
+
+        if (!transfer) return res.status(404).json({ success: false, message: 'Transfer not found.' });
+
+        const otpRecord = await prisma.otp.findFirst({
+            where: { phone: `back_${transfer_id}`, otp, purpose: 'stock_back', isUsed: false },
+            orderBy: { createdAt: 'desc' }
+        });
+
+        if (!otpRecord || otpRecord.expiresAt < new Date()) {
+            return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
+        }
+
+        await prisma.$transaction(async (tx) => {
+            // 1. Update Inventory
+            if (transfer.status === 'transferred') {
+                if (transfer.to_type === 'Outlet') {
+                    // Move from target outlet back to origin outlet
+                    await tx.outletInventory.update({
+                        where: { id: transfer.inventory_id },
+                        data: { outlet_id: transfer.from_id, status: 'In Stock' }
+                    });
+                } else if (transfer.to_type === 'Delivery Officer') {
+                    // Mark as In Stock at origin outlet
+                    await tx.outletInventory.update({
+                        where: { id: transfer.inventory_id },
+                        data: { status: 'In Stock' }
+                    });
+                }
+            } else if (transfer.status === 'pending') {
+                // Just revert 'Pending Transfer' to 'In Stock' at origin
+                await tx.outletInventory.update({
+                    where: { id: transfer.inventory_id },
+                    data: { status: 'In Stock' }
+                });
+            }
+
+            // 1. Update StockTransfer status
+            await tx.stockTransfer.update({
+                where: { id: parseInt(transfer_id) },
+                data: { status: 'Stock Back' }
+            });
+
+            // 3. Mark OTP as used
+            await tx.otp.update({
+                where: { id: otpRecord.id },
+                data: { isUsed: true }
+            });
+        });
+
         const io = req.app.get('io');
         if (io) {
-            const originRoom = `outlet_${from_id}`;
-            io.to(originRoom).emit('stock_transfer_request', {
-                requested_by_id: outlet_id,
-                requested_by_name: outlet_name || `Outlet ${outlet_id}`
+            const giverRoom = transfer.to_type === 'Delivery Officer' ? `user_${transfer.to_id}` : `outlet_${transfer.to_id}`;
+            const receiverRoom = transfer.from_type === 'Delivery Officer' ? `user_${transfer.from_id}` : `outlet_${transfer.from_id}`;
+
+            io.to(giverRoom).emit('stock_back_completed', { transfer_id, success: true });
+            io.to(receiverRoom).emit('stock_back_completed', { transfer_id, success: true });
+        }
+
+        const giverName = transfer.to_type === 'Delivery Officer'
+            ? (await prisma.user.findUnique({ where: { id: transfer.to_id }, select: { full_name: true } }))?.full_name || `User ${transfer.to_id}`
+            : (await prisma.outlet.findUnique({ where: { id: transfer.to_id }, select: { name: true } }))?.name || `Outlet ${transfer.to_id}`;
+
+        const logMsg = `Stock Back Verified: "${transfer.inventory?.product_name}" ${transfer.inventory?.imei_serial ? `(IMEI: ${transfer.inventory.imei_serial})` : ''} returned from ${transfer.to_type} ${giverName} to Outlet ${transfer.from_id}.`;
+
+        await logAction(req, 'STOCK_BACK_VERIFIED', logMsg, null, 'Inventory');
+
+        res.json({ success: true, message: 'Stock returned successfully.' });
+    } catch (error) {
+        console.error('verifyStockBack error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+// ─── Sync Product Plans from qistmarket API ───────────────────────────────────
+// Called when a product's price or installment plan changes on qistmarket.pk
+// POST /api/inventory/sync-product-plans
+// Body: { product_name, new_price, new_installments: [{advance, totalPrice, monthlyAmount, months, isActive}] }
+const syncProductPlans = async (req, res) => {
+    const { product_name, new_price, new_installments } = req.body;
+
+    if (!product_name) {
+        return res.status(400).json({ success: false, message: 'product_name is required.' });
+    }
+
+    if (!new_installments || !Array.isArray(new_installments) || new_installments.length === 0) {
+        return res.status(400).json({ success: false, message: 'new_installments array is required.' });
+    }
+
+    try {
+        const normalizedName = product_name.trim().toLowerCase();
+
+        // Find all inventory records linked to this API product (case-insensitive)
+        const matchingRecords = await prisma.outletInventory.findMany({
+            where: {
+                api_product_name: {
+                    equals: normalizedName,
+                    mode: 'insensitive'
+                }
+            },
+            select: { id: true }
+        });
+
+        if (matchingRecords.length === 0) {
+            return res.json({ 
+                success: true, 
+                updated: 0, 
+                message: 'No inventory records found for this product.' 
             });
         }
 
-        res.json({ success: true, message: 'Transfer request sent to origin outlet.' });
+        const ids = matchingRecords.map(r => r.id);
+
+        const formattedPlans = new_installments.map(i => ({
+            advance: parseFloat(i.advance) || 0,
+            totalPrice: parseFloat(i.totalPrice) || 0,
+            monthlyAmount: parseFloat(i.monthlyAmount) || 0,
+            months: parseInt(i.months) || 0,
+            isActive: i.isActive !== false,
+        }));
+
+        const updateData = {
+            installment_plans: formattedPlans
+        };
+        if (new_price !== undefined && new_price !== null) {
+            updateData.sale_price = parseFloat(new_price) || null;
+        }
+
+        await prisma.outletInventory.updateMany({
+            where: { id: { in: ids } },
+            data: updateData
+        });
+
+        console.log(`syncProductPlans: Updated ${ids.length} inventory records for "${product_name}"`);
+
+        res.json({ 
+            success: true, 
+            updated: ids.length, 
+            message: `Updated plans and sale price for ${ids.length} inventory record(s).` 
+        });
     } catch (error) {
-        console.error('requestStockTransfer error:', error);
+        console.error('syncProductPlans error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
     }
 };
@@ -1027,11 +1249,13 @@ module.exports = {
     getTransferHistory,
     cancelStockTransfer,
     resendStockTransferOTP,
-    requestStockTransfer,
+    initiateStockBack,
+    verifyStockBack,
     updateInventoryItem,
     deleteInventoryItem,
     bulkUpdateInventory,
     bulkDeleteInventory,
-    generateInstallments
+    generateInstallments,
+    syncProductPlans
 };
 

@@ -467,11 +467,14 @@ model OutletInventory {
   color_variant     String?
   quantity          Int             @default(1)
   installment_plans Json?
+  sale_price        Float?          // API recommended sale price (from qistmarket.pk)
+  api_product_name  String?         // Matched API product name for future sync
   outlet            Outlet          @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
   stockTransfers    StockTransfer[]
 
   @@index([outlet_id])
   @@index([status])
+  @@index([api_product_name])
   @@map("outlet_inventories")
 }
 
@@ -485,6 +488,7 @@ model StockTransfer {
   created_at           DateTime        @default(now())
   quantity_transferred Int             @default(1)
   status               String          @default("pending")
+  updated_at           DateTime        @updatedAt @default(now())
   cash_in_hands        CashInHand[]
   inventory            OutletInventory @relation(fields: [inventory_id], references: [id], onDelete: Cascade)
 

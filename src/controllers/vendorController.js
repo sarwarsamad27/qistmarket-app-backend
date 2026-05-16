@@ -1,13 +1,47 @@
 const prisma = require('../../lib/prisma');
+const axios = require('axios');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { logAction } = require('../utils/auditLogger');
 const { generateInstallments } = require('./inventoryController');
+
+const QIST_MARKET_API = 'https://api.qistmarket.pk/api/product';
+
+// Fetch all products from qistmarket.pk and build a lowercase name → product map
+async function fetchApiProductMap() {
+    try {
+        const response = await axios.get(QIST_MARKET_API, { timeout: 8000 });
+        const products = Array.isArray(response.data) ? response.data : [];
+        const map = new Map();
+        for (const p of products) {
+            if (p.name) {
+                map.set(p.name.trim().toLowerCase(), p);
+            }
+        }
+        return map;
+    } catch (err) {
+        console.warn('fetchApiProductMap: Could not reach qistmarket API:', err.message);
+        return new Map(); // Graceful fallback — use unit_price based plans
+    }
+}
+
+// Convert API ProductInstallments to our installment_plans format
+function mapApiInstallments(apiInstallments = []) {
+    return apiInstallments
+        .filter(i => i.isActive !== false)
+        .map(i => ({
+            advance: parseFloat(i.advance) || 0,
+            totalPrice: parseFloat(i.totalPrice) || 0,
+            monthlyAmount: parseFloat(i.monthlyAmount) || 0,
+            months: parseInt(i.months) || 0,
+            isActive: true,
+        }));
+}
 
 // Helper to generate Invoice Number: PUR-YYYY-XXXX
 const generateInvoiceNumber = async (tx) => {
     const year = new Date().getFullYear();
     const prefix = `PUR-${year}-`;
-    
+
     const lastPurchase = await tx.vendorPurchase.findFirst({
         where: { invoice_number: { startsWith: prefix } },
         orderBy: { invoice_number: 'desc' },
@@ -28,7 +62,7 @@ const generateInvoiceNumber = async (tx) => {
 const generateReturnNumber = async (tx) => {
     const year = new Date().getFullYear();
     const prefix = `RET-${year}-`;
-    
+
     const lastReturn = await tx.vendorPurchaseReturn.findFirst({
         where: { return_number: { startsWith: prefix } },
         orderBy: { return_number: 'desc' },
@@ -110,9 +144,12 @@ const createPurchase = async (req, res) => {
     }
 
     try {
+        // Fetch API product map BEFORE transaction (outside, to avoid slow HTTP inside tx)
+        const apiProductMap = await fetchApiProductMap();
+
         const result = await prisma.$transaction(async (tx) => {
             const invoice_number = await generateInvoiceNumber(tx);
-            
+
             // 1. Resolve Vendor
             let finalVendorId = vendor_id ? parseInt(vendor_id) : null;
             let finalVendorName = vendor_name;
@@ -163,6 +200,20 @@ const createPurchase = async (req, res) => {
                     total_price: totalPrice
                 });
 
+                // Resolve installments & sale price from API or fallback to unit_price
+                const apiProduct = apiProductMap.get((item.product_name || '').trim().toLowerCase());
+                let resolvedPlans;
+                let resolvedSalePrice = null;
+                let resolvedApiProductName = null;
+
+                if (apiProduct && apiProduct.ProductInstallments && apiProduct.ProductInstallments.length > 0) {
+                    resolvedPlans = mapApiInstallments(apiProduct.ProductInstallments);
+                    resolvedSalePrice = parseFloat(apiProduct.price) || null;
+                    resolvedApiProductName = apiProduct.name;
+                } else {
+                    resolvedPlans = generateInstallments(item.category || '', unitPrice);
+                }
+
                 // Add or update inventory
                 const existingItem = await tx.outletInventory.findFirst({
                     where: {
@@ -182,7 +233,9 @@ const createPurchase = async (req, res) => {
                             status: 'In Stock',
                             category: item.category || existingItem.category,
                             color_variant: item.color_variant || existingItem.color_variant,
-                            installment_plans: generateInstallments(item.category || existingItem.category || '', unitPrice)
+                            installment_plans: resolvedPlans,
+                            sale_price: resolvedSalePrice,
+                            api_product_name: resolvedApiProductName
                         }
                     });
                 } else {
@@ -196,7 +249,9 @@ const createPurchase = async (req, res) => {
                             quantity: qty,
                             purchase_price: unitPrice,
                             installment_price: 0,
-                            installment_plans: generateInstallments(item.category || '', unitPrice),
+                            installment_plans: resolvedPlans,
+                            sale_price: resolvedSalePrice,
+                            api_product_name: resolvedApiProductName,
                             status: 'In Stock'
                         }
                     });
@@ -237,8 +292,8 @@ const createPurchase = async (req, res) => {
         });
 
         await logAction(
-            req, 
-            'VENDOR_PURCHASE', 
+            req,
+            'VENDOR_PURCHASE',
             `Recorded purchase ${result.invoice_number} from ${result.vendor_name} for PKR ${result.total_amount}.`,
             result.id,
             'VendorPurchase'
@@ -250,9 +305,9 @@ const createPurchase = async (req, res) => {
         if (!isValidationError) {
             console.error('createPurchase error:', error);
         }
-        res.status(isValidationError ? 400 : 500).json({ 
-            success: false, 
-            message: error.message || 'Internal server error' 
+        res.status(isValidationError ? 400 : 500).json({
+            success: false,
+            message: error.message || 'Internal server error'
         });
     }
 };
@@ -268,6 +323,9 @@ const updatePurchase = async (req, res) => {
     }
 
     try {
+        // Fetch API product map before transaction
+        const apiProductMap = await fetchApiProductMap();
+
         const result = await prisma.$transaction(async (tx) => {
             const purchase = await tx.vendorPurchase.findUnique({
                 where: { id: parseInt(id) },
@@ -307,7 +365,7 @@ const updatePurchase = async (req, res) => {
 
             // Find deleted items
             const deletedItems = oldItems.filter(oldItem => !incomingIds.includes(oldItem.id));
-            
+
             for (const item of deletedItems) {
                 if (item.imei_serial) {
                     const connectedDelivery = await tx.delivery.findFirst({
@@ -364,7 +422,7 @@ const updatePurchase = async (req, res) => {
                     // Update existing item
                     const oldItem = oldItems.find(o => o.id === parseInt(item.id));
                     if (!oldItem) throw new Error(`Item ${item.id} not found in this purchase.`);
-                    
+
                     const oldImei = oldItem.imei_serial ? oldItem.imei_serial.trim() : null;
 
                     if (oldImei !== currentImei) {
@@ -374,7 +432,7 @@ const updatePurchase = async (req, res) => {
                             });
                             if (soldItem) throw new Error(`Cannot edit item. Old IMEI ${oldImei} has already been sold.`);
                         }
-                        
+
                         if (currentImei) {
                             const duplicate = await tx.outletInventory.findFirst({
                                 where: { imei_serial: currentImei }
@@ -400,7 +458,7 @@ const updatePurchase = async (req, res) => {
                     if (oldItem.unit_price !== unitPrice) {
                         changeLogs.push(`Changed Price for ${item.product_name} from ${oldItem.unit_price} to ${unitPrice}`);
                     }
-                    
+
                     let oldInvItem = await tx.outletInventory.findFirst({
                         where: {
                             outlet_id,
@@ -418,6 +476,17 @@ const updatePurchase = async (req, res) => {
                             throw new Error(`Cannot reduce quantity. Not enough units of ${oldItem.product_name} in stock.`);
                         }
 
+                        // Resolve plans from API or fallback
+                        const apiProductUpd = apiProductMap.get((item.product_name || '').trim().toLowerCase());
+                        let updPlans, updSalePrice = null, updApiName = null;
+                        if (apiProductUpd && apiProductUpd.ProductInstallments && apiProductUpd.ProductInstallments.length > 0) {
+                            updPlans = mapApiInstallments(apiProductUpd.ProductInstallments);
+                            updSalePrice = parseFloat(apiProductUpd.price) || null;
+                            updApiName = apiProductUpd.name;
+                        } else {
+                            updPlans = generateInstallments(item.category || oldInvItem.category || '', unitPrice);
+                        }
+
                         await tx.outletInventory.update({
                             where: { id: oldInvItem.id },
                             data: {
@@ -427,7 +496,9 @@ const updatePurchase = async (req, res) => {
                                 color_variant: item.color_variant || oldInvItem.color_variant,
                                 imei_serial: currentImei,
                                 purchase_price: unitPrice,
-                                installment_plans: generateInstallments(item.category || oldInvItem.category || '', unitPrice)
+                                installment_plans: updPlans,
+                                sale_price: updSalePrice,
+                                api_product_name: updApiName
                             }
                         });
                     }
@@ -465,13 +536,26 @@ const updatePurchase = async (req, res) => {
                         }
                     });
 
+                    // Resolve API plans for new items
+                    const apiProductNew = apiProductMap.get((item.product_name || '').trim().toLowerCase());
+                    let newPlans, newSalePrice = null, newApiName = null;
+                    if (apiProductNew && apiProductNew.ProductInstallments && apiProductNew.ProductInstallments.length > 0) {
+                        newPlans = mapApiInstallments(apiProductNew.ProductInstallments);
+                        newSalePrice = parseFloat(apiProductNew.price) || null;
+                        newApiName = apiProductNew.name;
+                    } else {
+                        newPlans = generateInstallments(item.category || '', unitPrice);
+                    }
+
                     if (existingItem) {
                         await tx.outletInventory.update({
                             where: { id: existingItem.id },
                             data: {
                                 quantity: existingItem.quantity + qty,
                                 purchase_price: unitPrice,
-                                installment_plans: generateInstallments(item.category || existingItem.category || '', unitPrice)
+                                installment_plans: newPlans,
+                                sale_price: newSalePrice,
+                                api_product_name: newApiName
                             }
                         });
                     } else {
@@ -485,7 +569,9 @@ const updatePurchase = async (req, res) => {
                                 quantity: qty,
                                 purchase_price: unitPrice,
                                 installment_price: 0,
-                                installment_plans: generateInstallments(item.category || '', unitPrice),
+                                installment_plans: newPlans,
+                                sale_price: newSalePrice,
+                                api_product_name: newApiName,
                                 status: 'In Stock'
                             }
                         });
@@ -510,7 +596,7 @@ const updatePurchase = async (req, res) => {
             // 3. Update Purchase amounts and details
             const amountDiff = newTotalAmount - purchase.total_amount;
             const newBalance = purchase.balance + amountDiff;
-            
+
             let newStatus = purchase.status;
             if (newBalance <= 0 && purchase.paid_amount > 0) newStatus = 'Paid';
             else if (purchase.paid_amount > 0) newStatus = 'Partial';
@@ -576,8 +662,8 @@ const updatePurchase = async (req, res) => {
         });
 
         await logAction(
-            req, 
-            'VENDOR_PURCHASE_EDIT', 
+            req,
+            'VENDOR_PURCHASE_EDIT',
             `Edited purchase ${result.invoice_number} from ${result.vendor_name}.`,
             result.id,
             'VendorPurchase'
@@ -589,9 +675,9 @@ const updatePurchase = async (req, res) => {
         if (!isValidationError) {
             console.error('updatePurchase error:', error);
         }
-        res.status(isValidationError ? 400 : 500).json({ 
-            success: false, 
-            message: error.message || 'Internal server error' 
+        res.status(isValidationError ? 400 : 500).json({
+            success: false,
+            message: error.message || 'Internal server error'
         });
     }
 };
@@ -660,8 +746,8 @@ const recordPayment = async (req, res) => {
         });
 
         await logAction(
-            req, 
-            'VENDOR_PAYMENT', 
+            req,
+            'VENDOR_PAYMENT',
             `Paid PKR ${result.amount} to ${result.vendor_name} for invoice ${result.purchase_id}.`,
             result.id,
             'VendorPayment'
@@ -739,9 +825,9 @@ const getVendorLedger = async (req, res) => {
             return { ...entry, running_balance: runBal };
         });
 
-        res.json({ 
-            success: true, 
-            vendor, 
+        res.json({
+            success: true,
+            vendor,
             ledger: ledgerWithBalance.reverse() // Newest first for UI 
         });
     } catch (error) {
@@ -759,8 +845,8 @@ const getPurchases = async (req, res) => {
     try {
         const purchases = await prisma.vendorPurchase.findMany({
             where: { outlet_id },
-            include: { 
-                items: true, 
+            include: {
+                items: true,
                 vendor: true,
                 returns: {
                     include: { items: true }
@@ -895,7 +981,7 @@ const deletePurchase = async (req, res) => {
 
                     // Check if marked as Sold in inventory
                     const soldItem = await tx.outletInventory.findFirst({
-                        where: { 
+                        where: {
                             imei_serial: item.imei_serial,
                             status: 'Sold'
                         }
@@ -958,7 +1044,7 @@ const deletePurchase = async (req, res) => {
         if (error.message.includes('Cannot delete purchase') || error.message.includes('Inventory record')) {
             return res.status(400).json({ success: false, message: error.message });
         }
-        
+
         console.error('deletePurchase error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
     }
@@ -976,7 +1062,7 @@ const createPurchaseReturn = async (req, res) => {
     try {
         const result = await prisma.$transaction(async (tx) => {
             const return_number = await generateReturnNumber(tx);
-            
+
             // 1. Resolve Vendor
             let finalVendorId = parseInt(vendor_id);
             const vendor = await tx.vendor.findUnique({ where: { id: finalVendorId } });
@@ -1079,7 +1165,7 @@ const createPurchaseReturn = async (req, res) => {
 
                     await tx.vendorPurchase.update({
                         where: { id: purchase.id },
-                        data: { 
+                        data: {
                             balance: newBalance,
                             status: newStatus
                         }
@@ -1091,8 +1177,8 @@ const createPurchaseReturn = async (req, res) => {
         });
 
         await logAction(
-            req, 
-            'VENDOR_PURCHASE_RETURN', 
+            req,
+            'VENDOR_PURCHASE_RETURN',
             `Recorded return ${result.return_number} to ${result.vendor_name} for PKR ${result.total_amount}.`,
             result.id,
             'VendorPurchaseReturn'

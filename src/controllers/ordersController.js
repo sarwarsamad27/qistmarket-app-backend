@@ -1151,6 +1151,12 @@ const getCsrDashboardStats = async (req, res) => {
       end.setHours(23, 59, 59, 999);
     }
 
+    // Yesterday for comparison
+    const yesterdayStart = new Date(start);
+    yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+    const yesterdayEnd = new Date(end);
+    yesterdayEnd.setDate(yesterdayEnd.getDate() - 1);
+
     const dateFilter = { gte: start, lte: end };
 
     // Base where clause — CSR sees only their own orders
@@ -1182,6 +1188,62 @@ const getCsrDashboardStats = async (req, res) => {
     const approvedCount = statusCounts['approved'] || 0;
     const pickedCount = statusCounts['picked'] || 0;
     const rejectedCount = statusCounts['rejected'] || 0;
+
+    const successRate = totalOrders > 0 ? Math.round((deliveredCount / totalOrders) * 100) : 0;
+    const cancelRate = totalOrders > 0 ? Math.round((cancelledCount / totalOrders) * 100) : 0;
+
+    // 1.1 Yesterday stats for increment
+    const [yesterdayStatusGroups, yesterdayDeliveredOrders] = await prisma.$transaction([
+      prisma.order.groupBy({
+        by: ['status'],
+        where: { ...baseWhere, updated_at: { gte: yesterdayStart, lte: yesterdayEnd } },
+        _count: { id: true },
+      }),
+      prisma.order.findMany({
+        where: { ...baseWhere, status: 'delivered', updated_at: { gte: yesterdayStart, lte: yesterdayEnd } },
+        select: { total_amount: true }
+      })
+    ]);
+
+    const yesterdayCounts = yesterdayStatusGroups.reduce((acc, item) => {
+      acc[item.status] = item._count.id;
+      return acc;
+    }, {});
+
+    const yesterdaySales = yesterdayDeliveredOrders.reduce((sum, o) => sum + (o.total_amount || 0), 0);
+
+    // 1.1 Target tracking base — total_amount from delivered orders for current period
+    const deliveredOrders = await prisma.order.findMany({
+      where: { ...baseWhere, status: 'delivered' },
+      select: { total_amount: true }
+    });
+    const achievedAmount = deliveredOrders.reduce((sum, order) => sum + (order.total_amount || 0), 0);
+    const achievedCustomers = deliveredCount;
+
+    const calcIncrement = (curr, prev) => {
+      if (!prev || prev === 0) return curr > 0 ? 100 : 0;
+      return Math.round(((curr - prev) / prev) * 100);
+    };
+
+    const todayIncrement = {
+      total: calcIncrement(totalOrders, Object.values(yesterdayCounts).reduce((a, b) => a + b, 0)),
+      new: calcIncrement(newCount, yesterdayCounts['new']),
+      pending: calcIncrement(pendingCount, yesterdayCounts['pending']),
+      delivered: calcIncrement(deliveredCount, yesterdayCounts['delivered']),
+      approved: calcIncrement(approvedCount, yesterdayCounts['approved']),
+      cancelled: calcIncrement(cancelledCount, yesterdayCounts['cancelled']),
+      expired: calcIncrement(expiredCount, yesterdayCounts['expired']),
+      sales: calcIncrement(achievedAmount, yesterdaySales),
+    };
+
+    // Calculate overall Success Rate increment (vs yesterday)
+    const yesterdayTotal = Object.values(yesterdayCounts).reduce((a, b) => a + b, 0);
+    const yesterdaySuccessRate = yesterdayTotal > 0 ? Math.round(((yesterdayCounts['delivered'] || 0) / yesterdayTotal) * 100) : 0;
+    const successRateIncrement = successRate - yesterdaySuccessRate;
+
+    const avgTicketSize = deliveredCount > 0 ? Math.round(achievedAmount / deliveredCount) : 0;
+    const yesterdayAvgTicketSize = (yesterdayCounts['delivered'] || 0) > 0 ? Math.round(yesterdaySales / yesterdayCounts['delivered']) : 0;
+    const avgTicketIncrement = calcIncrement(avgTicketSize, yesterdayAvgTicketSize);
 
     // 2. Channel breakdown (with status sub-grouping)
     const channelGroups = await prisma.order.groupBy({
@@ -1221,28 +1283,115 @@ const getCsrDashboardStats = async (req, res) => {
       website: buildChannelStats(['website']),
     };
 
-    // 3. Target tracking — total_amount from delivered orders
-    const deliveredOrders = await prisma.order.findMany({
-      where: { ...baseWhere, status: 'delivered' },
-      select: {
-        id: true,
-        total_amount: true,
+    const monthlyTarget = Number(process.env.CSR_MONTHLY_TARGET || process.env.CSR_SALES_TARGET || 1286500); 
+    const customerTarget = Number(process.env.CSR_CUSTOMER_TARGET || 486); 
+    const remainingAmount = monthlyTarget > 0 ? Math.max(0, monthlyTarget - achievedAmount) : 0;
+    const remainingCustomers = customerTarget > 0 ? Math.max(0, customerTarget - achievedCustomers) : 0;
+
+    // Working days logic (excluding Sundays)
+    const workingDaysLeft = getWorkingDaysLeftInMonth();
+    
+    // Calculate elapsed working days so far this month
+    const getWorkingDaysSoFar = () => {
+      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+      let count = 0;
+      let curr = new Date(monthStart);
+      while (curr <= now) {
+        if (curr.getDay() !== 0) count++;
+        curr.setDate(curr.getDate() + 1);
       }
+      return count || 1;
+    };
+    const workingDaysSoFar = getWorkingDaysSoFar();
+
+    const dailyAvgRequired = workingDaysLeft > 0 ? Math.round(remainingCustomers / workingDaysLeft) : 0;
+    const currentDailyAvg = Math.round((achievedCustomers / workingDaysSoFar) * 100) / 100;
+
+    const targetTracking = {
+      monthlyTarget,
+      achievedAmount,
+      remainingAmount,
+      achievedCustomers,
+      customerTarget,
+      remainingCustomers,
+      dailyAvgRequired,
+      currentDailyAvg,
+      remainingDays: workingDaysLeft,
+      progressPct: customerTarget > 0 ? Math.round((achievedCustomers / customerTarget) * 100) : 0,
+      avgTicketSize,
+      avgTicketIncrement,
+      successRateIncrement,
+      overallTodayIncrement: todayIncrement.total // Match the big "TODAY INCREMENT" card
+    };
+
+    // 4. Historical Data for Graphs (This Month vs Last Month)
+    const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999);
+
+    const getDailyStats = async (periodStart, periodEnd) => {
+        const orders = await prisma.order.findMany({
+            where: {
+                status: 'delivered',
+                updated_at: { gte: periodStart, lte: periodEnd },
+                ...(isCsr ? { created_by_user_id: userId } : {})
+            },
+            select: { updated_at: true, total_amount: true }
+        });
+
+        const daily = {};
+        orders.forEach(o => {
+            const day = o.updated_at.getDate();
+            if (!daily[day]) daily[day] = { amount: 0, customers: 0 };
+            daily[day].amount += (o.total_amount || 0);
+            daily[day].customers += 1;
+        });
+        return daily;
+    };
+
+    const thisMonthDaily = await getDailyStats(thisMonthStart, end);
+    const lastMonthDaily = await getDailyStats(lastMonthStart, lastMonthEnd);
+
+    // Format for frontend (arrays of values for days 1-31)
+    const graphData = {
+        days: Array.from({ length: 31 }, (_, i) => i + 1),
+        sales: {
+            current: Array.from({ length: 31 }, (_, i) => thisMonthDaily[i + 1]?.amount || 0),
+            previous: Array.from({ length: 31 }, (_, i) => lastMonthDaily[i + 1]?.amount || 0)
+        },
+        customers: {
+            current: Array.from({ length: 31 }, (_, i) => thisMonthDaily[i + 1]?.customers || 0),
+            previous: Array.from({ length: 31 }, (_, i) => lastMonthDaily[i + 1]?.customers || 0)
+        }
+    };
+
+    // 5. Outlet Performance
+    const outletStats = await prisma.order.groupBy({
+        by: ['outlet_id', 'status'],
+        where: baseWhere,
+        _count: { id: true },
     });
 
-    const achievedAmount = deliveredOrders.reduce((sum, order) => sum + (order.total_amount || 0), 0);
+    const outletsRaw = await prisma.outlet.findMany({
+        select: { id: true, name: true }
+    });
 
-    const achievedCustomers = deliveredOrders.length;
-    const monthlyTarget = Number(process.env.CSR_MONTHLY_TARGET || process.env.CSR_SALES_TARGET || 0);
-    const customerTarget = Number(process.env.CSR_CUSTOMER_TARGET || 0);
-    const remaining = monthlyTarget > 0 ? Math.max(0, monthlyTarget - achievedAmount) : 0;
+    const outletPerformanceMap = {};
+    outletStats.forEach(stat => {
+        const oid = stat.outlet_id;
+        if (!oid) return;
+        if (!outletPerformanceMap[oid]) outletPerformanceMap[oid] = { id: oid, name: outletsRaw.find(o => o.id === oid)?.name || 'Unknown', total: 0, delivered: 0 };
+        outletPerformanceMap[oid].total += stat._count.id;
+        if (stat.status === 'delivered') outletPerformanceMap[oid].delivered += stat._count.id;
+    });
 
-    const workingDaysLeft = getWorkingDaysLeftInMonth();
-    const dailyAvgRequired = remaining > 0 ? Math.round(remaining / workingDaysLeft) : 0;
-
-    // 4. Overall success metrics
-    const successRate = totalOrders > 0 ? Math.round((deliveredCount / totalOrders) * 100) : 0;
-    const cancelRate = totalOrders > 0 ? Math.round((cancelledCount / totalOrders) * 100) : 0;
+    const outletPerformance = Object.values(outletPerformanceMap)
+        .map(o => ({
+            ...o,
+            successRate: o.total > 0 ? Math.round((o.delivered / o.total) * 100) : 0
+        }))
+        .sort((a, b) => b.successRate - a.successRate || b.delivered - a.delivered)
+        .slice(0, 5);
 
     // 5. CSR Ranking Board
     const rankingPeriod = filter === 'custom' ? 'month' : filter;
@@ -1257,7 +1406,12 @@ const getCsrDashboardStats = async (req, res) => {
         id: true,
         full_name: true,
         username: true,
-        image: true
+        image: true,
+        outlet: {
+          select: {
+            name: true
+          }
+        }
       }
     });
 
@@ -1270,6 +1424,35 @@ const getCsrDashboardStats = async (req, res) => {
       }
     });
 
+    // Fetch complaints for all CSRs in this period
+    const solvedComplaintsGroups = await prisma.complaint.groupBy({
+      by: ['assigned_to_user_id'],
+      where: {
+        status: 'Solved',
+        updated_at: { gte: start, lte: end }
+      },
+      _count: { id: true }
+    });
+
+    const pendingComplaintsGroups = await prisma.complaint.groupBy({
+      by: ['assigned_to_user_id'],
+      where: {
+        status: { in: ['Pending', 'In Progress', 'Assigned'] },
+        created_at: { lte: end } // All pending up to current period end
+      },
+      _count: { id: true }
+    });
+
+    const complaintsSolvedMap = solvedComplaintsGroups.reduce((acc, c) => {
+      acc[c.assigned_to_user_id] = c._count.id;
+      return acc;
+    }, {});
+
+    const complaintsPendingMap = pendingComplaintsGroups.reduce((acc, c) => {
+      acc[c.assigned_to_user_id] = c._count.id;
+      return acc;
+    }, {});
+
     // Map rankings by CSR ID for quick lookup
     const rankingMap = rankings.reduce((acc, r) => {
       acc[r.csr_id] = r;
@@ -1280,20 +1463,30 @@ const getCsrDashboardStats = async (req, res) => {
       const rankRecord = rankingMap[officer.id];
       const isStaleToday = rankingPeriod === 'today' && rankRecord && rankRecord.updated_at < start;
       const useData = rankRecord && !isStaleToday;
+      const score = useData ? rankRecord.score : 0;
+
+      // League logic
+      let league = 'Bronze';
+      if (score >= 1500) league = 'Gold';
+      else if (score >= 1000) league = 'Silver';
 
       return {
         userId: officer.id,
         name: officer.full_name,
         username: officer.username,
         image: officer.image,
+        outletName: officer.outlet?.name || 'Main Outlet',
         uniqueCustomers: useData ? rankRecord.unique_customers : 0,
         delivered: useData ? rankRecord.delivered_customers : 0,
         repeatCustomers: useData ? rankRecord.repeat_customers : 0,
         cancelled: useData ? rankRecord.cancelled_customers : 0,
         expired: useData ? rankRecord.expired_customers : 0,
         totalSales: useData ? rankRecord.total_sales : 0,
-        score: useData ? rankRecord.score : 0,
+        score: score,
         trend: useData ? rankRecord.trend : 0,
+        league: league,
+        complaintsSolved: complaintsSolvedMap[officer.id] || 0,
+        complaintsPending: complaintsPendingMap[officer.id] || 0,
         successRate: (useData && rankRecord.unique_customers > 0) ? Math.round((rankRecord.delivered_customers / rankRecord.unique_customers) * 100) : 0,
         cancelRate: (useData && rankRecord.unique_customers > 0) ? Math.round((rankRecord.cancelled_customers / rankRecord.unique_customers) * 100) : 0,
       };
@@ -1327,18 +1520,13 @@ const getCsrDashboardStats = async (req, res) => {
           picked: pickedCount,
           rejected: rejectedCount,
         },
+        todayIncrement,
         channelStats,
         successRate,
         cancelRate,
-        targetTracking: {
-          monthlyTarget,
-          achievedAmount,
-          remaining,
-          achievedCustomers,
-          customerTarget,
-          dailyAvgRequired,
-          progressPct: monthlyTarget > 0 ? Math.round((achievedAmount / monthlyTarget) * 100) : 0,
-        },
+        targetTracking,
+        graphData,
+        outletPerformance,
         csrRanking,
       },
     });

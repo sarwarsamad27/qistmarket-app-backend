@@ -1226,7 +1226,9 @@ const getDeliveryBoyInventory = async (req, res) => {
             quantity: true,
             purchase_price: true,
             status: true,
-            installment_plans: true
+            installment_plans: true,
+            sale_price: true,
+            api_product_name: true
           }
         }
       },
@@ -1252,6 +1254,8 @@ const getDeliveryBoyInventory = async (req, res) => {
           color_variant: t.inventory.color_variant || null,
           purchase_price: t.inventory.purchase_price,
           installment_plans: t.inventory.installment_plans,
+          sale_price: t.inventory.sale_price || null,
+          api_product_name: t.inventory.api_product_name || null,
           total_qty: 0,
           units: []
         });

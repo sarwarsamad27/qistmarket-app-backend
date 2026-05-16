@@ -156,9 +156,18 @@ async function updateCsrRanking(csrId, periodType = 'month') {
         totalSales += stat.sales;
     });
 
+    // Fetch Solved Complaints for the CSR in the period
+    const solvedComplaintsCount = await prisma.complaint.count({
+        where: {
+            assigned_to_user_id: csrId,
+            status: 'Solved',
+            updated_at: { gte: start, lte: end }
+        }
+    });
+
     // Scoring Formula
-    // Final Score = (Delivered Customers × 10) + (Repeat Customers × 5) + (Completed Customers × 3) - (Cancelled Customers × 5) - (Expired Customers × 3)
-    const score = (deliveredCount * 10) + (repeatCount * 5) + (completedCount * 3) - (cancelledCount * 5) - (expiredCount * 3);
+    // Final Score = (Delivered × 10) + (Repeat × 5) + (Completed × 5) + (COMPLAINTS SOLVED + 1) - (Cancelled × 1) - (Expired × 3)
+    const score = (deliveredCount * 10) + (repeatCount * 5) + (completedCount * 5) + (solvedComplaintsCount + 1) - (cancelledCount * 1) - (expiredCount * 3);
 
     // Update Snapshot
     const ranking = await prisma.csrRanking.upsert({
