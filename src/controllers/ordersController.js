@@ -86,6 +86,21 @@ async function sendOrderTransferNotification(order, outletId, io = null) {
   }
 }
 
+async function sendOrderUntransferNotification(order, outletId, io = null) {
+  const users = await prisma.user.findMany({
+    where: { outlet_id: outletId },
+    select: { id: true }
+  });
+
+  const title = 'Order Taken Back';
+  const message = `Order ${order.order_ref} has been taken back from your outlet.`;
+  const notificationType = 'order_untransfer';
+
+  for (const user of users) {
+    await notifyUser(user.id, title, message, notificationType, order.id, io);
+  }
+}
+
 /**
  * Counts the number of Sundays between two dates
  */
@@ -1474,6 +1489,8 @@ const getCsrDashboardStats = async (req, res) => {
       if (score >= 1500) league = 'Gold';
       else if (score >= 1000) league = 'Silver';
 
+      console.log(rankRecord)
+
       return {
         userId: officer.id,
         name: officer.full_name,
@@ -2055,7 +2072,46 @@ const assignBulk = async (req, res) => {
 
 const transferOrder = async (req, res) => {
   const { id } = req.params;
-  const { outlet_id } = req.body;                               
+  const { outlet_id, action = 'transfer' } = req.body;                               
+
+  if (action === 'untransfer') {
+    try {
+      const order = await prisma.order.findUnique({
+        where: { id: parseInt(id) }
+      });
+
+      if (!order) {
+        return res.status(404).json({ success: false, message: 'Order not found' });
+      }
+
+      const prevOutletId = order.outlet_id;
+
+      const updatedOrder = await prisma.order.update({
+        where: { id: parseInt(id) },
+        data: {
+          outlet_id: null,
+          assigned_to_user_id: null,
+          verification_assigned_at: null,
+        }
+      });
+
+      await logOrderStatusChange(updatedOrder.id, 'transferred', 'untransferred', req.user);
+
+      if (prevOutletId) {
+        const io = req.app.get('io');
+        await sendOrderUntransferNotification(updatedOrder, prevOutletId, io);
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: 'Order un-transferred successfully',
+        data: { order: updatedOrder },
+      });
+    } catch (error) {
+      console.error('untransferOrder error:', error);
+      return res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+  }
 
   if (!outlet_id) {
     return res.status(400).json({ success: false, message: 'Outlet ID is required for transfer' });
@@ -2063,7 +2119,13 @@ const transferOrder = async (req, res) => {
 
   try {
     const order = await prisma.order.findUnique({
-      where: { id: parseInt(id) }
+      where: { id: parseInt(id) },
+      include: {
+        statusHistories: {
+          orderBy: { created_at: 'desc' },
+          take: 1
+        }
+      }
     });
 
     if (!order) {
@@ -2082,7 +2144,9 @@ const transferOrder = async (req, res) => {
       }
     });
 
-    await logOrderStatusChange(updatedOrder.id, order.status, 'transferred', req.user);
+    const lastHistory = order.statusHistories && order.statusHistories[0];
+    const oldStatus = lastHistory && lastHistory.new_status === 'untransferred' ? 'untransferred' : order.status;
+    await logOrderStatusChange(updatedOrder.id, oldStatus, 'transferred', req.user);
 
     const io = req.app.get('io');
     await sendOrderTransferNotification(updatedOrder, parseInt(outlet_id), io);
@@ -2100,10 +2164,45 @@ const transferOrder = async (req, res) => {
 };
 
 const transferBulk = async (req, res) => {
-  const { order_ids, outlet_id } = req.body;
+  const { order_ids, outlet_id, action = 'transfer' } = req.body;
 
-  if (!Array.isArray(order_ids) || order_ids.length === 0 || !outlet_id) {
-    return res.status(400).json({ success: false, message: 'Order IDs array and Outlet ID are required' });
+  if (!Array.isArray(order_ids) || order_ids.length === 0) {
+    return res.status(400).json({ success: false, message: 'Order IDs array is required' });
+  }
+
+  if (action === 'untransfer') {
+    try {
+      const orders = await prisma.order.findMany({ where: { id: { in: order_ids.map(Number) } }});
+
+      await prisma.order.updateMany({
+        where: { id: { in: order_ids.map(Number) } },
+        data: {
+          outlet_id: null,
+          assigned_to_user_id: null,
+          verification_assigned_at: null,
+        }
+      });
+
+      const io = req.app.get('io');
+      for (const order of orders) {
+        await logOrderStatusChange(order.id, 'transferred', 'untransferred', req.user);
+        if (order.outlet_id) {
+          await sendOrderUntransferNotification(order, order.outlet_id, io);
+        }
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: `${order_ids.length} orders un-transferred successfully`,
+      });
+    } catch (error) {
+      console.error('untransferBulk error:', error);
+      return res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+  }
+
+  if (!outlet_id) {
+    return res.status(400).json({ success: false, message: 'Outlet ID is required for transfer' });
   }
 
   try {
@@ -2116,16 +2215,21 @@ const transferBulk = async (req, res) => {
       }
     });
 
-    for (const orderId of order_ids) {
-      await logOrderStatusChange(orderId, 'new', 'transferred', req.user);
-    }
-
     const io = req.app.get('io');
     const updatedOrders = await prisma.order.findMany({
-      where: { id: { in: order_ids.map(Number) } }
+      where: { id: { in: order_ids.map(Number) } },
+      include: {
+        statusHistories: {
+          orderBy: { created_at: 'desc' },
+          take: 1
+        }
+      }
     });
 
     for (const order of updatedOrders) {
+      const lastHistory = order.statusHistories && order.statusHistories[0];
+      const oldStatus = lastHistory && lastHistory.new_status === 'untransferred' ? 'untransferred' : (order.status || 'new');
+      await logOrderStatusChange(order.id, oldStatus, 'transferred', req.user);
       await sendOrderTransferNotification(order, parseInt(outlet_id), io);
     }
 

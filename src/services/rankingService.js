@@ -166,8 +166,25 @@ async function updateCsrRanking(csrId, periodType = 'month') {
     });
 
     // Scoring Formula
-    // Final Score = (Delivered × 10) + (Repeat × 5) + (Completed × 5) + (COMPLAINTS SOLVED + 1) - (Cancelled × 1) - (Expired × 3)
-    const score = (deliveredCount * 10) + (repeatCount * 5) + (completedCount * 5) + (solvedComplaintsCount + 1) - (cancelledCount * 1) - (expiredCount * 3);
+    // Final Score = (Delivered × 10) + (Repeat × 5) + (Completed × 5) + (COMPLAINTS SOLVED × 1) - (Cancelled × 1) - (Expired × 3)
+    const score = (deliveredCount * 10) + (repeatCount * 5) + (completedCount * 5) + (solvedComplaintsCount * 1) - (cancelledCount * 1) - (expiredCount * 3);
+
+    // Fetch existing ranking to calculate trend
+    const existingRanking = await prisma.csrRanking.findUnique({
+        where: {
+            csr_id_period_month_year: {
+                csr_id: csrId,
+                period: periodType,
+                month: periodType === 'month' ? now.getMonth() + 1 : 0,
+                year: periodType === 'month' ? now.getFullYear() : 0
+            }
+        }
+    });
+
+    let trend = existingRanking?.trend || 0;
+    if (existingRanking && score !== existingRanking.score) {
+        trend = score > existingRanking.score ? 1 : -1;
+    }
 
     // Update Snapshot
     const ranking = await prisma.csrRanking.upsert({
@@ -188,6 +205,7 @@ async function updateCsrRanking(csrId, periodType = 'month') {
             expired_customers: expiredCount,
             total_sales: totalSales,
             score: score,
+            trend: trend,
             updated_at: getPKTDate()
         },
         create: {
@@ -202,7 +220,8 @@ async function updateCsrRanking(csrId, periodType = 'month') {
             cancelled_customers: cancelledCount,
             expired_customers: expiredCount,
             total_sales: totalSales,
-            score: score
+            score: score,
+            trend: 0
         }
     });
 

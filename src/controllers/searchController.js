@@ -120,6 +120,25 @@ const globalSearch = async (req, res) => {
 
         const results = Array.from(orderResults.values()).map(order => {
             const purchaser = order.verification?.purchaser;
+
+            let is_ledger_cleared = false;
+            if (order.status === 'delivered') {
+                const ledger = order.installment_ledger;
+                if (ledger && ledger.ledger_rows) {
+                    try {
+                        const rows = Array.isArray(ledger.ledger_rows)
+                            ? ledger.ledger_rows
+                            : JSON.parse(ledger.ledger_rows);
+                        const normalized = getNormalizedLedger(rows);
+                        if (normalized && normalized.summary) {
+                            is_ledger_cleared = normalized.summary.grandTotalRemaining <= 0;
+                        }
+                    } catch (e) {
+                        console.error('Error normalizing ledger in globalSearch:', e);
+                    }
+                }
+            }
+
             return {
                 id: order.id,
                 order_ref: order.order_ref,
@@ -132,6 +151,7 @@ const globalSearch = async (req, res) => {
                 imei_serial: order.delivery?.product_imei || order.imei_serial,
                 address: purchaser?.present_address || order.address,
                 ledger_short_id: order.installment_ledger?.short_id || null,
+                is_ledger_cleared,
                 verification: order.verification ? {
                     cnic: purchaser?.cnic_number,
                     purchaser: purchaser,
@@ -305,20 +325,20 @@ const checkPhoneOrders = async (req, res) => {
         const ordersMap = new Map();
 
         directOrders.forEach(o => {
-            ordersMap.set(o.id, { ...o, role: 'Order Contact' });
+            ordersMap.set(o.id, { ...o, role: 'Order Contact', is_blacklisted: false });
         });
 
         purchaserMatches.forEach(pm => {
             if (pm.verification?.order) {
                 const o = pm.verification.order;
-                ordersMap.set(o.id, { ...o, role: 'Purchaser' });
+                ordersMap.set(o.id, { ...o, role: 'Purchaser', is_blacklisted: pm.is_blacklisted || false });
             }
         });
 
         grantorMatches.forEach(gm => {
             if (gm.verification?.order) {
                 const o = gm.verification.order;
-                ordersMap.set(o.id, { ...o, role: `Guarantor ${gm.grantor_number || ''}`.trim() });
+                ordersMap.set(o.id, { ...o, role: `Guarantor ${gm.grantor_number || ''}`.trim(), is_blacklisted: gm.is_blacklisted || false });
             }
         });
 
