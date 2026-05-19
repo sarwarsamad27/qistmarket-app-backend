@@ -18,7 +18,9 @@ const {
     generateInstallmentOtp,
     verifyInstallmentPayment,
     getOutletOfficers,
-    getOfficerDetails
+    getOfficerDetails,
+    getOutletInstallmentsDueList,
+    updateInstallmentNote
 } = require('../controllers/outletController');
 const { generateSmartPayQr, checkSmartPayQr } = require('../controllers/smartPayController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
@@ -41,6 +43,8 @@ router.post('/outlet/verify-return-otp', authenticateJWT, verifyReturnExchangeOt
 router.get('/outlet/search-delivered-orders', authenticateJWT, searchDeliveredOrders);
 router.post('/outlet/initiate-direct-return', authenticateJWT, initiateDirectReturn);
 router.get('/outlet/installments', authenticateJWT, getOutletInstallments);
+router.get('/outlet/installments/due-list', authenticateJWT, getOutletInstallmentsDueList);
+router.patch('/outlet/installments/:id/note', authenticateJWT, updateInstallmentNote);
 
 // Installment Payment flows (Outlet Managers)
 router.post('/outlet/installment/generate-otp', authenticateJWT, generateInstallmentOtp);

@@ -1208,6 +1208,23 @@ const verifyInstallmentPayment = async (req, res) => {
             return res.status(400).json({ success: false, message: `Payment exceeds due amount. Remaining is ${dueAmount - existingPaid}` });
         }
 
+        // Maintain strict payment history of dates and amounts for partial/full payment tracking
+        if (!rows[rowIndex].payment_history) {
+            rows[rowIndex].payment_history = [];
+            if (existingPaid > 0) {
+                rows[rowIndex].payment_history.push({
+                    amount: existingPaid,
+                    date: rows[rowIndex].paid_at || new Date(),
+                    method: rows[rowIndex].payment_method || 'Cash'
+                });
+            }
+        }
+        rows[rowIndex].payment_history.push({
+            amount: payingNow,
+            date: new Date(),
+            method: payment_method
+        });
+
         rows[rowIndex].paid_amount = totalPaid;
         rows[rowIndex].paid_at = new Date();
         rows[rowIndex].payment_method = payment_method;
@@ -1623,6 +1640,295 @@ const getOfficerDetails = async (req, res) => {
     }
 };
 
+const getOutletInstallmentsDueList = async (req, res) => {
+    const { outlet_id } = req.user;
+    const {
+        page = 1,
+        limit = 10,
+        search = '',
+        tab = 'fresh', // 'fresh', 'due', 'completed'
+        month,
+        year
+    } = req.query;
+
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+    const skip = (pageNum - 1) * limitNum;
+    const q = search.trim().toLowerCase();
+
+    try {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        // Determine date range for chosen month & year
+        const defaultYear = today.getFullYear();
+        const defaultMonth = today.getMonth() + 1; // 1-indexed
+
+        const filterMonth = month ? parseInt(month) : defaultMonth;
+        const filterYear = year ? parseInt(year) : defaultYear;
+
+        const start = new Date(filterYear, filterMonth - 1, 1);
+        const end = new Date(filterYear, filterMonth, 0, 23, 59, 59, 999);
+
+        // Fetch all delivered orders for the outlet
+        const orders = await prisma.order.findMany({
+            where: {
+                is_delivered: true,
+                ...(outlet_id && { outlet_id: outlet_id }),
+            },
+            include: {
+                verification: {
+                    include: {
+                        purchaser: true,
+                        grantors: true,
+                        documents: {
+                            where: { label: { in: ['Purchaser Profile', 'Grantor 1 Profile', 'Grantor 2 Profile', 'Purchaser Face Photo'] } },
+                            orderBy: { uploaded_at: 'desc' }
+                        }
+                    },
+                },
+                delivery: {
+                    include: {
+                        installment_ledger: true,
+                    },
+                },
+                cash_in_hand: {
+                    take: 1,
+                    orderBy: { created_at: 'desc' },
+                }
+            }
+        });
+
+        // ── Pre-fetch Inventory details based on IMEI to map product_name ──
+        const allImeis = orders
+            .map(o => o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial)
+            .filter(Boolean);
+
+        const inventories = await prisma.outletInventory.findMany({
+            where: { imei_serial: { in: allImeis } },
+            select: { imei_serial: true, product_name: true }
+        });
+
+        const inventoryMap = new Map();
+        for (const inv of inventories) {
+            if (inv.imei_serial) {
+                inventoryMap.set(inv.imei_serial, inv);
+            }
+        }
+
+        // Stats aggregations
+        let totalDueThisMonth = 0;
+        let totalPaidThisMonth = 0;
+        let overallSystemRemaining = 0;
+        let overallSystemPaid = 0;
+
+        const allInstallments = [];
+
+        orders.forEach(order => {
+            const purchaser = order.verification?.purchaser || null;
+            const grantors = order.verification?.grantors || [];
+            const documents = order.verification?.documents || [];
+            const delivery = order.delivery;
+            const ledgerModel = delivery?.installment_ledger || null;
+            const cashRecord = order.cash_in_hand?.[0] || null;
+
+            const imeiSerial = cashRecord?.imei_serial || delivery?.product_imei || order.imei_serial || null;
+            const invInfo = imeiSerial ? inventoryMap.get(imeiSerial) : null;
+
+            const normalized = getNormalizedLedger(ledgerModel?.ledger_rows);
+            const { installment_ledger: installmentLedger, summary } = normalized;
+
+            // Increment overall system stats
+            overallSystemRemaining += summary.totalInstallmentRemaining;
+            overallSystemPaid += summary.totalInstallmentPaid;
+
+            // Parse raw ledger rows to extract specific installment-level notes
+            let rawLedgerRows = [];
+            try {
+                if (ledgerModel?.ledger_rows) {
+                    rawLedgerRows = Array.isArray(ledgerModel.ledger_rows)
+                        ? ledgerModel.ledger_rows
+                        : JSON.parse(ledgerModel.ledger_rows);
+                }
+            } catch (e) {
+                console.error("Error parsing raw ledger rows:", e);
+            }
+
+            // Extract Guarantor 1 & Guarantor 2 separately
+            const g1 = grantors.find(g => g.grantor_number === 1) || grantors[0] || null;
+            const g2 = grantors.find(g => g.grantor_number === 2) || (grantors[0] && grantors[1] && grantors[0].id !== grantors[1].id ? grantors[1] : null);
+
+            const g1Name = g1?.name || 'N/A';
+            const g1Phone = g1?.telephone_number || 'N/A';
+            const g2Name = g2?.name || 'N/A';
+            const g2Phone = g2?.telephone_number || 'N/A';
+
+            // Process each installment in the ledger
+            installmentLedger.forEach(inst => {
+                if (!inst.dueDate) return;
+                const instDate = new Date(inst.dueDate);
+
+                // Check if this installment falls in the selected month & year
+                if (instDate >= start && instDate <= end) {
+                    totalDueThisMonth += inst.dueAmount;
+                    totalPaidThisMonth += inst.paidAmount;
+
+                    // Extract alternate number
+                    const altNum = purchaser?.alternate_contact || order.alternate_contact || 'N/A';
+                    const customerArea = order.area || purchaser?.present_address || 'N/A';
+
+                    // Find installment-specific note and payment history details
+                    const matchedRawRow = rawLedgerRows.find(r => r.month === inst.monthNumber);
+                    const installmentNote = matchedRawRow?.note || '';
+                    
+                    const paymentHistory = matchedRawRow?.payment_history || (matchedRawRow?.paid_at ? [{
+                        amount: matchedRawRow.paid_amount,
+                        date: matchedRawRow.paid_at,
+                        method: matchedRawRow.payment_method || 'Cash'
+                    }] : []);
+
+                    allInstallments.push({
+                        order_id: order.id,
+                        order_ref: order.order_ref,
+                        customer_name: purchaser?.name || order.customer_name,
+                        whatsapp_number: order.whatsapp_number,
+                        alternate_number: altNum,
+                        area: customerArea,
+                        dueDate: inst.dueDate,
+                        purchaseDate: order.created_at,
+                        grantor1Name: g1Name,
+                        grantor1Phone: g1Phone,
+                        grantor2Name: g2Name,
+                        grantor2Phone: g2Phone,
+                        product_name: invInfo?.product_name || cashRecord?.product_name || order.product_name,
+                        imei_serial: imeiSerial || 'N/A',
+                        monthlyAmount: inst.dueAmount,
+                        remainingAmount: summary.totalInstallmentRemaining, // remaining installment amount for order
+                        partialPayment: (inst.paidAmount > 0 && inst.status !== 'paid') ? inst.paidAmount : (inst.status === 'paid' ? inst.dueAmount : null),
+                        paidDate: matchedRawRow?.paid_at || inst.paidAt || null,
+                        paymentHistory: paymentHistory,
+                        note: installmentNote,
+                        monthNumber: inst.monthNumber,
+                        status: inst.status || 'pending',
+                        dueDateObj: instDate
+                    });
+                }
+            });
+        });
+
+        // Sort by Due Date (ascending)
+        allInstallments.sort((a, b) => a.dueDateObj - b.dueDateObj);
+
+        // Apply Tab Filter
+        let filtered = allInstallments;
+        if (tab === 'completed') {
+            filtered = allInstallments.filter(inst => inst.status === 'paid');
+        } else if (tab === 'due') {
+            filtered = allInstallments.filter(inst => inst.status !== 'paid' && inst.dueDateObj < today);
+        } else if (tab === 'fresh') {
+            filtered = allInstallments.filter(inst => inst.status !== 'paid' && inst.dueDateObj >= today);
+        }
+
+        // Apply Search Filter
+        if (q) {
+            filtered = filtered.filter(inst => {
+                return (
+                    (inst.order_ref || '').toLowerCase().includes(q) ||
+                    (inst.customer_name || '').toLowerCase().includes(q) ||
+                    (inst.whatsapp_number || '').toLowerCase().includes(q) ||
+                    (inst.alternate_number || '').toLowerCase().includes(q) ||
+                    (inst.area || '').toLowerCase().includes(q) ||
+                    (inst.grantor1Name || '').toLowerCase().includes(q) ||
+                    (inst.grantor2Name || '').toLowerCase().includes(q) ||
+                    (inst.product_name || '').toLowerCase().includes(q) ||
+                    (inst.imei_serial || '').toLowerCase().includes(q)
+                );
+            });
+        }
+
+        // Pagination
+        const total = filtered.length;
+        const totalPages = Math.ceil(total / limitNum);
+        const paginated = filtered.slice(skip, skip + limitNum);
+
+        res.json({
+            success: true,
+            data: {
+                installments: paginated,
+                stats: {
+                    totalDueThisMonth,
+                    totalPaidThisMonth,
+                    remainingThisMonth: Math.max(0, totalDueThisMonth - totalPaidThisMonth),
+                    overallSystemRemaining,
+                    overallSystemPaid
+                },
+                pagination: {
+                    total,
+                    page: pageNum,
+                    limit: limitNum,
+                    totalPages
+                }
+            }
+        });
+    } catch (error) {
+        console.error('getOutletInstallmentsDueList error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const updateInstallmentNote = async (req, res) => {
+    const { id } = req.params; // Order ID
+    const { note, month_number } = req.body;
+
+    if (month_number === undefined || month_number === null) {
+        return res.status(400).json({ success: false, message: 'month_number is required' });
+    }
+
+    try {
+        // Fetch order with installment ledger
+        const order = await prisma.order.findUnique({
+            where: { id: parseInt(id) },
+            include: {
+                delivery: {
+                    include: {
+                        installment_ledger: true
+                    }
+                }
+            }
+        });
+
+        const ledger = order?.delivery?.installment_ledger;
+        if (!ledger) {
+            return res.status(404).json({ success: false, message: 'Installment ledger not found' });
+        }
+
+        let rows = [];
+        if (ledger.ledger_rows) {
+            rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : JSON.parse(ledger.ledger_rows);
+        }
+
+        // Find the monthly installment row
+        const targetRow = rows.find(r => r.month === parseInt(month_number));
+        if (!targetRow) {
+            return res.status(404).json({ success: false, message: `Installment for month ${month_number} not found` });
+        }
+
+        // Update note specifically for this installment month
+        targetRow.note = note;
+
+        // Save ledger rows back
+        await prisma.installmentLedger.update({
+            where: { id: ledger.id },
+            data: { ledger_rows: rows }
+        });
+
+        res.json({ success: true, message: 'Installment note updated successfully' });
+    } catch (error) {
+        console.error('updateInstallmentNote error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
 module.exports = {
     createOutlet,
     getOutlets,
@@ -1641,5 +1947,7 @@ module.exports = {
     generateInstallmentOtp,
     verifyInstallmentPayment,
     getOutletOfficers,
-    getOfficerDetails
+    getOfficerDetails,
+    getOutletInstallmentsDueList,
+    updateInstallmentNote
 };

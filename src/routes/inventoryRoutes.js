@@ -40,4 +40,3 @@ router.patch('/outlet/inventory/:id', authenticateJWT, updateInventoryItem);
 router.delete('/outlet/inventory/:id', authenticateJWT, deleteInventoryItem);
 
 module.exports = router;
-
