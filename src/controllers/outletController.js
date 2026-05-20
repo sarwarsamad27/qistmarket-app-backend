@@ -7,6 +7,7 @@ const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { sendOTP, sendInstallmentPaymentReceipt, sendPartialInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
+const { getPKTDate } = require('../utils/dateUtils');
 
 
 const createOutlet = async (req, res) => {
@@ -142,54 +143,130 @@ const getDashboardStats = async (req, res) => {
     }
 
     try {
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
+        const { filter = 'today', startDate, endDate } = req.query;
+
+        // Date range calculation using PKT (matching CSR analytics)
+        const now = getPKTDate();
+        let start, end;
+
+        if (filter === 'today') {
+            start = new Date(now);
+            start.setHours(0, 0, 0, 0);
+            end = new Date(now);
+            end.setHours(23, 59, 59, 999);
+        } else if (filter === 'month') {
+            start = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+            end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+        } else if (filter === 'custom' && startDate && endDate) {
+            start = new Date(startDate);
+            start.setHours(0, 0, 0, 0);
+            end = new Date(endDate);
+            end.setHours(23, 59, 59, 999);
+        } else {
+            start = new Date(now);
+            start.setHours(0, 0, 0, 0);
+            end = new Date(now);
+            end.setHours(23, 59, 59, 999);
+        }
+
+        // Previous period dates for increment/trend calculations
+        let prevStart, prevEnd;
+        if (filter === 'today') {
+            prevStart = new Date(start);
+            prevStart.setDate(prevStart.getDate() - 1);
+            prevEnd = new Date(end);
+            prevEnd.setDate(prevEnd.getDate() - 1);
+        } else if (filter === 'month') {
+            prevStart = new Date(start.getFullYear(), start.getMonth() - 1, 1, 0, 0, 0, 0);
+            prevEnd = new Date(start.getFullYear(), start.getMonth(), 0, 23, 59, 59, 999);
+        } else if (filter === 'custom') {
+            const diff = end.getTime() - start.getTime();
+            prevStart = new Date(start.getTime() - diff - 1);
+            prevEnd = new Date(start.getTime() - 1);
+        } else {
+            prevStart = new Date(start);
+            prevStart.setDate(prevStart.getDate() - 1);
+            prevEnd = new Date(end);
+            prevEnd.setDate(prevEnd.getDate() - 1);
+        }
+
+        const dateFilter = { gte: start, lte: end };
+
+        // Fetch current period orders for this outlet
+        const currentOrders = await prisma.order.findMany({
+            where: {
+                outlet_id,
+                updated_at: dateFilter
+            }
+        });
+
+        // Fetch previous period orders for this outlet
+        const prevOrders = await prisma.order.findMany({
+            where: {
+                outlet_id,
+                updated_at: { gte: prevStart, lte: prevEnd }
+            }
+        });
+
+        const getCounts = (orders) => {
+            const pendingVerification = orders.filter(o => o.status === 'in_progress').length;
+            const approvedOrders = orders.filter(o => o.status === 'approved').length;
+            const deliveryPending = orders.filter(o => o.status === 'picked').length;
+            const delivered = orders.filter(o => o.status === 'delivered').length;
+            const cancelledOrders = orders.filter(o => o.status === 'cancelled').length;
+            const rejectedOrders = orders.filter(o => o.status === 'rejected').length;
+            const expiredOrders = orders.filter(o => o.status === 'expired').length;
+            const totalOrders = orders.length;
+
+            return {
+                totalOrders,
+                pendingVerification,
+                approvedOrders,
+                deliveryPending,
+                delivered,
+                cancelledOrders,
+                rejectedOrders,
+                expiredOrders
+            };
+        };
+
+        const currentCounts = getCounts(currentOrders);
+        const prevCounts = getCounts(prevOrders);
+
+        // Sales calculation: Shifting from ledger advance to total order amount of delivered orders
+        const getSalesSum = (ordersList) => {
+            const deliveredList = ordersList.filter(o => o.status === 'delivered');
+            return deliveredList.reduce((sum, o) => sum + (o.total_amount || 0), 0);
+        };
+
+        const currentSales = getSalesSum(currentOrders);
+        const prevSales = getSalesSum(prevOrders);
+
+        // Calculate sales for performance timelines (daily, weekly, monthly) using total order value of delivered orders
+        const todayStart = new Date(now);
+        todayStart.setHours(0, 0, 0, 0);
 
         const firstDayOfWeek = new Date();
         firstDayOfWeek.setDate(firstDayOfWeek.getDate() - firstDayOfWeek.getDay());
         firstDayOfWeek.setHours(0, 0, 0, 0);
 
-        const firstDayOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+        const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
-        // Filter orders by this outlet
-        const outletOrders = await prisma.order.findMany({
-            where: { outlet_id },
-            include: { delivery: true }
-        });
-
-        const pendingVerification = outletOrders.filter(o => o.status === 'in_progress').length;
-        const approvedOrders = outletOrders.filter(o => o.status === 'approved').length;
-        const deliveryPending = outletOrders.filter(o => o.status === 'picked').length;
-        const delivered = outletOrders.filter(o => o.status === 'delivered').length;
-        const cancelledOrders = outletOrders.filter(o => o.status === 'cancelled').length;
-        const rejectedOrders = outletOrders.filter(o => o.status === 'rejected').length;
-        const expiredOrders = outletOrders.filter(o => o.status === 'expired').length;
-
-        // Performance: Calculate sales from Installment Ledger payments (Advance + Installment collections)
-        const outletLedgers = await prisma.installmentLedger.findMany({
-            where: { order: { outlet_id } }
-        });
-
-        const calculateLedgerSales = (startDate) => {
-            let total = 0;
-            outletLedgers.forEach(ledger => {
-                const rows = normalizeLedger(ledger.ledger_rows);
-                rows.forEach(row => {
-                    const rowPaidAmount = row.paidAmount || 0;
-                    if (rowPaidAmount > 0 && row.paid_at) {
-                        const paidDate = new Date(row.paid_at);
-                        if (paidDate >= startDate) {
-                            total += rowPaidAmount;
-                        }
-                    }
-                });
+        const getSalesForTimeline = async (sinceDate) => {
+            const orders = await prisma.order.findMany({
+                where: {
+                    outlet_id,
+                    status: 'delivered',
+                    updated_at: { gte: sinceDate }
+                },
+                select: { total_amount: true }
             });
-            return total;
+            return orders.reduce((sum, o) => sum + (o.total_amount || 0), 0);
         };
 
-        const dailySales = calculateLedgerSales(today);
-        const weeklySales = calculateLedgerSales(firstDayOfWeek);
-        const monthlySales = calculateLedgerSales(firstDayOfMonth);
+        const dailySales = await getSalesForTimeline(todayStart);
+        const weeklySales = await getSalesForTimeline(firstDayOfWeek);
+        const monthlySales = await getSalesForTimeline(firstDayOfMonth);
 
         // Financial Overview (using CashRegister table for latest snapshot)
         const latestRegister = await prisma.cashRegister.findFirst({
@@ -197,7 +274,7 @@ const getDashboardStats = async (req, res) => {
             orderBy: { date: 'desc' }
         });
 
-        // ─── Installment Summary ──────────────────────────────────────
+        // ─── Installment Summary (Overall Cumulative Snapshot) ──────────────────────────────────────
         const deliveredOrders = await prisma.order.findMany({
             where: {
                 outlet_id: outlet_id,
@@ -232,23 +309,82 @@ const getDashboardStats = async (req, res) => {
             }
         }
 
+        // Calculate growth increment percentage
+        const calcIncrement = (curr, prev) => {
+            if (!prev || prev === 0) return curr > 0 ? 100 : 0;
+            return Math.round(((curr - prev) / prev) * 100);
+        };
+
+        const todayIncrement = {
+            total: calcIncrement(currentCounts.totalOrders, prevCounts.totalOrders),
+            pending: calcIncrement(currentCounts.pendingVerification, prevCounts.pendingVerification),
+            approved: calcIncrement(currentCounts.approvedOrders, prevCounts.approvedOrders),
+            deliveryPending: calcIncrement(currentCounts.deliveryPending, prevCounts.deliveryPending),
+            delivered: calcIncrement(currentCounts.delivered, prevCounts.delivered),
+            cancelled: calcIncrement(currentCounts.cancelledOrders, prevCounts.cancelledOrders),
+            rejected: calcIncrement(currentCounts.rejectedOrders, prevCounts.rejectedOrders),
+            expired: calcIncrement(currentCounts.expiredOrders, prevCounts.expiredOrders),
+            sales: calcIncrement(currentSales, prevSales),
+        };
+
+        // Graph Data: Current Month vs Last Month delivered orders
+        const getDailyStats = async (periodStart, periodEnd) => {
+            const orders = await prisma.order.findMany({
+                where: {
+                    outlet_id,
+                    status: 'delivered',
+                    updated_at: { gte: periodStart, lte: periodEnd }
+                },
+                select: { updated_at: true, total_amount: true }
+            });
+
+            const daily = {};
+            orders.forEach(o => {
+                const day = o.updated_at.getDate();
+                if (!daily[day]) daily[day] = { amount: 0, customers: 0 };
+                daily[day].amount += (o.total_amount || 0);
+                daily[day].customers += 1;
+            });
+            return daily;
+        };
+
+        const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+        const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        const lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999);
+
+        const thisMonthDaily = await getDailyStats(thisMonthStart, now);
+        const lastMonthDaily = await getDailyStats(lastMonthStart, lastMonthEnd);
+
+        const graphData = {
+            days: Array.from({ length: 31 }, (_, i) => i + 1),
+            sales: {
+                current: Array.from({ length: 31 }, (_, i) => thisMonthDaily[i + 1]?.amount || 0),
+                previous: Array.from({ length: 31 }, (_, i) => lastMonthDaily[i + 1]?.amount || 0)
+            },
+            customers: {
+                current: Array.from({ length: 31 }, (_, i) => thisMonthDaily[i + 1]?.customers || 0),
+                previous: Array.from({ length: 31 }, (_, i) => lastMonthDaily[i + 1]?.customers || 0)
+            }
+        };
+
         res.json({
             success: true,
             stats: {
                 orders: {
-                    todayOrders: outletOrders.filter(o => o.created_at >= today).length,
-                    pendingVerification,
-                    approvedOrders,
-                    deliveryPending,
-                    delivered,
-                    cancelledOrders,
-                    rejectedOrders,
-                    expiredOrders
+                    todayOrders: currentCounts.totalOrders,
+                    pendingVerification: currentCounts.pendingVerification,
+                    approvedOrders: currentCounts.approvedOrders,
+                    deliveryPending: currentCounts.deliveryPending,
+                    delivered: currentCounts.delivered,
+                    cancelledOrders: currentCounts.cancelledOrders,
+                    rejectedOrders: currentCounts.rejectedOrders,
+                    expiredOrders: currentCounts.expiredOrders
                 },
                 performance: {
                     dailySales,
                     weeklySales,
-                    monthlySales
+                    monthlySales,
+                    periodSales: currentSales
                 },
                 installments: {
                     totalInstallmentDue,
@@ -265,7 +401,9 @@ const getDashboardStats = async (req, res) => {
                     cash_from_delivery: 0,
                     expenses: 0,
                     closing_cash: 0
-                }
+                },
+                todayIncrement,
+                graphData
             }
         });
 
