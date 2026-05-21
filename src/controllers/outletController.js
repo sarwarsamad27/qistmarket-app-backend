@@ -1146,8 +1146,26 @@ const getOutletInstallments = async (req, res) => {
                 },
                 delivery: {
                     include: {
-                        installment_ledger: true,
+                        installment_ledger: {
+                            include: {
+                                consumer_numbers: {
+                                    take: 1,
+                                    orderBy: { created_at: 'desc' },
+                                    select: {
+                                        id: true,
+                                        consumer_number: true,
+                                    }
+                                }
+                            }
+                        },
                     },
+                },
+                recovery_officer: {
+                    select: {
+                        id: true,
+                        full_name: true,
+                        phone: true
+                    }
                 },
                 cash_in_hand: {
                     take: 1,
@@ -1252,7 +1270,14 @@ const getOutletInstallments = async (req, res) => {
                     totalInstallments: installmentLedger.length,
                 },
                 installmentLedger,
-                ledger_short_id: ledgerModel?.token || null
+                ledger_short_id: ledgerModel?.token || null,
+                consumer_number: ledgerModel?.consumer_numbers?.[0]?.consumer_number || null,
+                consumer_bill_status: ledgerModel?.consumer_numbers?.[0]?.bill_status || null,
+                recovery_officer: order.recovery_officer ? {
+                    id: order.recovery_officer.id,
+                    name: order.recovery_officer.full_name,
+                    phone: order.recovery_officer.phone
+                } : null
             };
         });
 
@@ -1827,8 +1852,30 @@ const getOutletInstallmentsDueList = async (req, res) => {
                 },
                 delivery: {
                     include: {
-                        installment_ledger: true,
+                        installment_ledger: {
+                            include: {
+                                consumer_numbers: {
+                                    take: 1,
+                                    orderBy: { created_at: 'desc' },
+                                    select: {
+                                        id: true,
+                                        consumer_number: true,
+                                        bill_status: true,
+                                        amount_due: true,
+                                        billing_month: true,
+                                        due_date: true
+                                    }
+                                }
+                            }
+                        },
                     },
+                },
+                recovery_officer: {
+                    select: {
+                        id: true,
+                        full_name: true,
+                        phone: true
+                    }
                 },
                 cash_in_hand: {
                     take: 1,
@@ -1918,7 +1965,7 @@ const getOutletInstallmentsDueList = async (req, res) => {
                     // Find installment-specific note and payment history details
                     const matchedRawRow = rawLedgerRows.find(r => r.month === inst.monthNumber);
                     const installmentNote = matchedRawRow?.note || '';
-                    
+
                     const paymentHistory = matchedRawRow?.payment_history || (matchedRawRow?.paid_at ? [{
                         amount: matchedRawRow.paid_amount,
                         date: matchedRawRow.paid_at,
@@ -1948,7 +1995,14 @@ const getOutletInstallmentsDueList = async (req, res) => {
                         note: installmentNote,
                         monthNumber: inst.monthNumber,
                         status: inst.status || 'pending',
-                        dueDateObj: instDate
+                        dueDateObj: instDate,
+                        consumer_number: ledgerModel?.consumer_numbers?.[0]?.consumer_number || null,
+                        consumer_bill_status: ledgerModel?.consumer_numbers?.[0]?.bill_status || null,
+                        recovery_officer: order.recovery_officer ? {
+                            id: order.recovery_officer.id,
+                            name: order.recovery_officer.full_name,
+                            phone: order.recovery_officer.phone
+                        } : null
                     });
                 }
             });

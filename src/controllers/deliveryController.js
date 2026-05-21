@@ -8,6 +8,7 @@ const { notifyUser, notifyAdmins, notifyOutlet } = require('../utils/notificatio
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const admin = require('firebase-admin');
 const { getPKTDate, formatPKTDate } = require("../utils/dateUtils");
+const { generateConsumerNumber } = require('../utils/consumerNumberUtils');
 
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -284,7 +285,7 @@ const submitDelivery = async (req, res) => {
           color_variant: colorVariant || null,
           stock_transfer_id: stockTransferId,
           payment_method: 'Cash',
-          created_at: getPKTDate(new Date())  
+          created_at: getPKTDate(new Date())
         }
       });
     }
@@ -306,7 +307,7 @@ const submitDelivery = async (req, res) => {
         try {
           const raw = req.body.custom_ledger;
           if (raw) customLedger = typeof raw === 'string' ? JSON.parse(raw) : raw;
-        } catch(e) { /* ignore parse errors */ }
+        } catch (e) { /* ignore parse errors */ }
 
         // 1. Advance Payment row (always month 0, always auto)
         ledgerRows.push({
@@ -373,6 +374,47 @@ const submitDelivery = async (req, res) => {
             ledger_rows: ledgerRows,
           },
         });
+
+        const mobile = purchaser?.telephone_number || order.whatsapp_number;
+        const consumerNo = await generateConsumerNumber(product_imei, mobile);
+
+        // Save the consumer_numbers record 
+        // using the new table as specified by 1Bill TPS spec
+        let firstMonthDue = 0;
+        let dueDate = getPKTDate();
+        let billingMonthStr = "0000";
+
+        if (Array.isArray(ledgerRows) && ledgerRows.length > 1) {
+          // Row 1 is Month 1 since Row 0 is Advance Payment
+          firstMonthDue = ledgerRows[1].amount || 0;
+          if (ledgerRows[1].due_date) {
+            const d = new Date(ledgerRows[1].due_date);
+            if (!isNaN(d.getTime())) {
+              dueDate = d;
+              billingMonthStr = String(d.getFullYear()).slice(-2) + String(d.getMonth() + 1).padStart(2, '0');
+            }
+          }
+        }
+
+        try {
+          await prisma.consumerNumber.create({
+            data: {
+              consumer_number: consumerNo,
+              ledger_id: installmentLedger.id,
+              delivery_id: delivery.id,
+              customer_name: purchaser?.name || order.customer_name || 'N/A',
+              mobile_number: mobile || 'N/A',
+              imei_serial: product_imei || null,
+              amount_due: firstMonthDue,
+              billing_month: billingMonthStr,
+              due_date: dueDate,
+              bill_status: 'U', // Unpaid
+            }
+          });
+        } catch (consumerErr) {
+          console.error('[submitDelivery] Failed to create ConsumerNumber (Non-fatal):', consumerErr);
+        }
+
       }
     } catch (ledgerErr) {
       // Non-fatal — log and continue
@@ -602,7 +644,7 @@ const getCashInHand = async (req, res) => {
     // SPECIAL CASE: Agar sirf pending dekhna hai
     if (status === 'pending') {
       where.status = 'pending';
-    } 
+    }
     // SPECIAL CASE: Jab koi bhi filter apply nahi hai
     else if (!date && !date_from && !date_to && !status) {
       // Sab kuch dikhao - koi date filter nahi
@@ -612,7 +654,7 @@ const getCashInHand = async (req, res) => {
       if (status) {
         where.status = status;
       }
-      
+
       if (date) {
         const selectedDate = new Date(date);
         const nextDay = new Date(date);
@@ -673,7 +715,7 @@ const getCashInHand = async (req, res) => {
         payment_method: entry.payment_method,
         order_ref: entry.order?.order_ref || 'N/A'
       });
-      
+
       // 2. DEBIT ENTRIES (Submissions - jab officer ne outlet ko pay kiya)
       if (entry.submission_history && entry.submission_history.length > 0) {
         entry.submission_history.forEach(sub => {
@@ -781,7 +823,7 @@ const submitCashToOutlet = async (req, res) => {
       status: 'pending'
     };
 
-   if (ids.length > 0) {
+    if (ids.length > 0) {
       // Filter out any NaN or invalid IDs
       const validIds = ids.filter(id => !isNaN(id) && id > 0);
       if (validIds.length > 0) {
@@ -1010,7 +1052,7 @@ const verifyDeliveryOtp = async (req, res) => {
     if (custom_ledger) {
       try {
         const parsedLedger = typeof custom_ledger === 'string' ? JSON.parse(custom_ledger) : custom_ledger;
-        
+
         await prisma.$transaction(async (tx) => {
           // 1. Update Order Status
           await tx.order.update({
@@ -1074,10 +1116,10 @@ const verifyDeliveryOtp = async (req, res) => {
           io
         );
 
-        return res.status(200).json({ 
-          success: true, 
-          valid: true, 
-          message: 'OTP verified and delivery completed successfully' 
+        return res.status(200).json({
+          success: true,
+          valid: true,
+          message: 'OTP verified and delivery completed successfully'
         });
 
       } catch (e) {
@@ -1210,9 +1252,9 @@ const getDeliveryBoyInventory = async (req, res) => {
     const deliveryBoyId = req.user.id;
 
     const transfers = await prisma.stockTransfer.findMany({
-      where: { 
-        to_type: 'Delivery Officer', 
-        to_id: deliveryBoyId, 
+      where: {
+        to_type: 'Delivery Officer',
+        to_id: deliveryBoyId,
         status: { in: ['transferred', 'delivered'] }
       },
       include: {
@@ -1737,7 +1779,7 @@ const submitSelfPickupDelivery = async (req, res) => {
         try {
           const raw = req.body.custom_ledger;
           if (raw) customLedger = typeof raw === 'string' ? JSON.parse(raw) : raw;
-        } catch(e) { /* ignore parse errors */ }
+        } catch (e) { /* ignore parse errors */ }
 
         // Advance row always first
         ledgerRows.push({
@@ -1794,7 +1836,50 @@ const submitSelfPickupDelivery = async (req, res) => {
             ledger_rows: ledgerRows,
           }
         });
+
+        // -------------------------------------------------------------
+        // TPS / 1BILL CONSUMER NUMBER GENERATION FOR SELF PICKUP
+        // -------------------------------------------------------------
+        const mobile = purchaser?.telephone_number || order.whatsapp_number;
+        const consumerNo = await generateConsumerNumber(product_imei, mobile);
+
+        let firstMonthDue = 0;
+        let dueDate = getPKTDate();
+        let billingMonthStr = "0000";
+
+        if (Array.isArray(ledgerRows) && ledgerRows.length > 1) {
+          // Row 1 is Month 1 since Row 0 is Advance Payment
+          firstMonthDue = ledgerRows[1].amount || 0;
+          if (ledgerRows[1].due_date) {
+            const d = new Date(ledgerRows[1].due_date);
+            if (!isNaN(d.getTime())) {
+              dueDate = d;
+              billingMonthStr = String(d.getFullYear()).slice(-2) + String(d.getMonth() + 1).padStart(2, '0');
+            }
+          }
+        }
+
+        try {
+          await prisma.consumerNumber.create({
+            data: {
+              consumer_number: consumerNo,
+              ledger_id: installmentLedger.id,
+              delivery_id: delivery.id,
+              customer_name: confirmedCustomerName || order.customer_name || 'N/A',
+              mobile_number: mobile || 'N/A',
+              imei_serial: product_imei || null,
+              amount_due: firstMonthDue,
+              billing_month: billingMonthStr,
+              due_date: dueDate,
+              bill_status: 'U', // Unpaid
+            }
+          });
+        } catch (consumerErr) {
+          console.error('[submitSelfPickupDelivery] Failed to create ConsumerNumber (Non-fatal):', consumerErr);
+        }
+
       }
+
     } catch (ledgerErr) {
       console.error('[submitSelfPickupDelivery] Ledger creation error:', ledgerErr);
     }

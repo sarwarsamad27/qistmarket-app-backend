@@ -38,6 +38,7 @@ const outletReportRoutes = require('./src/routes/outletReportRoutes');
 const searchRoutes = require('./src/routes/searchRoutes');
 const securityLogRoutes = require('./src/routes/securityLogRoutes');
 const complaintRoutes = require('./src/routes/complaintRoutes');
+const tpsRoutes = require('./src/routes/tpsRoutes');
 
 
 // JWT secret (must be set in .env)
@@ -423,7 +424,7 @@ app.get('/', (req, res) => {
 // ────────────────────────────────────────────────
 // Routes
 // ────────────────────────────────────────────────
-app.use('/ledger', ledgerRoutes); 
+app.use('/ledger', ledgerRoutes);
 app.use('/api/app-version', appVersionRoutes);   // Public ledger routes — no auth required, must be first!
 app.use('/api/ledger', ledgerRoutes);
 app.use('/api', authRoutes);
@@ -441,6 +442,7 @@ app.use('/api', productRoutes);
 app.use('/api/recovery', recoveryRoutes);
 app.use('/api/customers', customerRoutes);
 app.use('/api', complaintRoutes);
+app.use('/api/Payments', tpsRoutes);
 app.use('/api', reportRoutes);
 app.use('/api', cashRegisterRoutes);
 app.use('/api', expenseRoutes);

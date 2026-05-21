@@ -197,7 +197,7 @@ model DummyCustomer {
   zone               String?
   alternate_contact  String?
   moved_at           DateTime @default(now())
-  
+
   order              Order    @relation("OrderDummyCustomer", fields: [order_id], references: [id], onDelete: Cascade)
 
   @@index([order_id])
@@ -366,7 +366,7 @@ model VendorPurchaseEditHistory {
   changes_summary String?        @db.Text
   purchase        VendorPurchase @relation(fields: [purchase_id], references: [id], onDelete: Cascade)
   user            User?          @relation("vendor_purchase_edits", fields: [edited_by_id], references: [id])
-  
+
   @@index([purchase_id])
   @@index([edited_by_id])
   @@map("vendor_purchase_edit_histories")
@@ -400,7 +400,7 @@ model VendorPurchaseReturn {
   notes           String?                  @db.Text
   created_at      DateTime                 @default(now())
   updated_at      DateTime                 @updatedAt
-  
+
   outlet          Outlet                   @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
   purchase        VendorPurchase?          @relation(fields: [purchase_id], references: [id])
   vendor          Vendor                   @relation(fields: [vendor_id], references: [id], onDelete: Cascade)
@@ -424,7 +424,7 @@ model VendorPurchaseReturnItem {
   unit_price        Float
   total_price       Float
   reason            String?              @db.Text
-  
+
   return            VendorPurchaseReturn @relation(fields: [return_id], references: [id], onDelete: Cascade)
 
   @@index([return_id])
@@ -720,6 +720,7 @@ model Delivery {
   order              Order              @relation("OrderDelivery", fields: [order_id], references: [id], onDelete: Cascade)
   uploads            DeliveryUpload[]
   installment_ledger InstallmentLedger?
+  consumerNumbers    ConsumerNumber[]
 
   @@index([delivery_agent_id])
 }
@@ -751,7 +752,7 @@ model CashInHand {
   imei_serial       String?
   color_variant     String?
   stock_transfer_id Int?
-  
+
   // New fields for partial payment support
   cash_type         String?        @default("Advance amount payment")
   submitted_amount  Float          @default(0)
@@ -980,6 +981,8 @@ model InstallmentLedger {
   delivery    Delivery @relation(fields: [delivery_id], references: [id], onDelete: Cascade)
   order       Order    @relation(fields: [order_id], references: [id], onDelete: Cascade)
 
+  consumer_numbers ConsumerNumber[]
+
   @@index([token])
   @@index([short_id])
   @@map("installment_ledgers")
@@ -1103,4 +1106,48 @@ model CsrRanking {
 
   @@unique([csr_id, period, month, year])
   @@map("csr_rankings")
+}
+
+model ConsumerNumber {
+  id              Int       @id @default(autoincrement())
+  consumer_number String    @unique
+  ledger_id       Int
+  delivery_id     Int
+  customer_name   String
+  mobile_number   String
+  imei_serial     String?
+  amount_due      Decimal   @db.Decimal(10, 2)
+  billing_month   String    @db.VarChar(4) // format YYMM
+  due_date        DateTime
+  bill_status     String    @default("U") @db.VarChar(1) // U=Unpaid, P=Paid, B=Blocked
+  amount_paid     Decimal?  @db.Decimal(10, 2)
+  date_paid       DateTime?
+  tran_auth_id    String?
+  bank_mnemonic   String?
+  created_at      DateTime  @default(now())
+  updated_at      DateTime  @updatedAt
+
+  ledger   InstallmentLedger @relation(fields: [ledger_id], references: [id])
+  delivery Delivery          @relation(fields: [delivery_id], references: [id])
+
+  @@index([consumer_number])
+  @@map("consumer_numbers")
+}
+
+model TpsPaymentLog {
+  id                        Int      @id @default(autoincrement())
+  consumer_number           String
+  tran_auth_id              String
+  transaction_amount_raw    String
+  transaction_amount_parsed Decimal  @db.Decimal(10, 2)
+  tran_date                 String
+  tran_time                 String
+  bank_mnemonic             String
+  reserved                  String?
+  response_code_sent        String
+  is_duplicate              Boolean  @default(false)
+  created_at                DateTime @default(now())
+
+  @@index([consumer_number, tran_auth_id, tran_date, tran_time])
+  @@map("tps_payment_logs")
 }
