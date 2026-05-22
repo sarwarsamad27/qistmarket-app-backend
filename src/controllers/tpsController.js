@@ -97,14 +97,34 @@ const billInquiry = async (req, res) => {
             });
         }
 
+        let calculatedAmountDue = Number(consumer.amount_due || 0);
+
+        // Check if due date is passed
+        if (consumer.due_date) {
+            const today = new Date();
+            const due = new Date(consumer.due_date);
+            // Ignore time formatting and check Date boundaries if needed, but simple getTime works for standard due_dates.
+            if (today.getTime() > due.getTime()) {
+                const ledger = await prisma.installmentLedger.findUnique({
+                    where: { id: consumer.ledger_id }
+                });
+                if (ledger && Array.isArray(ledger.ledger_rows)) {
+                    const pendingRows = ledger.ledger_rows.filter(r => r.status === 'pending');
+                    if (pendingRows.length > 1) { // 0 is current, 1 is next
+                        calculatedAmountDue += Number(pendingRows[1].amount || pendingRows[1].dueAmount || 0);
+                    }
+                }
+            }
+        }
+
         // 00 = Valid consumer, active, bill unpaid, payment allowed
         return res.status(200).json({
             response_Code: "00",
             consumer_detail: padCustomerName(consumer.customer_name),
             bill_status: "U",
             due_date: toYYYYMMDD(consumer.due_date),
-            amount_within_dueDate: formatTpsAmount(consumer.amount_due),
-            amount_after_dueDate: formatTpsAmount(consumer.amount_due),
+            amount_within_dueDate: formatTpsAmount(calculatedAmountDue),
+            amount_after_dueDate: formatTpsAmount(calculatedAmountDue),
             billing_month: consumer.billing_month || "    ",
             date_paid: "        ",       // exactly 8 spaces
             amount_paid: "            ",    // exactly 12 spaces
@@ -226,38 +246,50 @@ const billPayment = async (req, res) => {
         if (ledger && Array.isArray(ledger.ledger_rows)) {
             let rows = [...ledger.ledger_rows];
 
-            // Find the row they are currently paying for
-            const pendingIndex = rows.findIndex(r => r.status === 'pending');
+            let remainingAmount = parsedAmountFinal;
+            let paymentApplied = false;
 
-            if (pendingIndex !== -1) {
-                // Mark current row as paid
-                rows[pendingIndex].status = 'paid';
-                rows[pendingIndex].paid_amount = parsedAmountFinal;
-                rows[pendingIndex].paid_at = paidDateParsed;
-                rows[pendingIndex].payment_method = `1LINK TPS - ${bank_mnemonic || 'UNKNOWN'}`;
+            for (let i = 0; i < rows.length; i++) {
+                if (rows[i].status === 'pending' && remainingAmount > 0) {
+                    paymentApplied = true;
+                    const expected = parseFloat(rows[i].amount || rows[i].dueAmount || 0);
 
+                    let payThisRow = remainingAmount;
+                    if (remainingAmount >= expected && expected > 0) {
+                        payThisRow = expected;
+                    }
+
+                    rows[i].status = 'paid';
+                    rows[i].paid_amount = payThisRow;
+                    rows[i].paid_at = paidDateParsed;
+                    rows[i].payment_method = `1LINK TPS - ${bank_mnemonic || 'UNKNOWN'}`;
+
+                    remainingAmount -= payThisRow;
+
+                    try {
+                        await prisma.orderPayment.create({
+                            data: {
+                                order_id: ledger.order_id,
+                                paymentType: 'installment',
+                                monthNumber: parseInt(rows[i].month) || null,
+                                amount: payThisRow,
+                                paymentMethod: `1LINK TPS - ${bank_mnemonic || ''}`,
+                                is_submitted: true,
+                                paidAt: paidDateParsed
+                            }
+                        });
+                    } catch (paymentLogErr) {
+                        console.error('[TPS BillPayment] Failed to log OrderPayment:', paymentLogErr);
+                    }
+                }
+            }
+
+            if (paymentApplied) {
                 // Update the complete ledger
                 await prisma.installmentLedger.update({
                     where: { id: ledger.id },
                     data: { ledger_rows: rows }
                 });
-
-                // Insert into OrderPayment for admin tracking
-                try {
-                    await prisma.orderPayment.create({
-                        data: {
-                            order_id: ledger.order_id,
-                            paymentType: 'installment',
-                            monthNumber: parseInt(rows[pendingIndex].month) || null,
-                            amount: parsedAmountFinal,
-                            paymentMethod: `1LINK TPS - ${bank_mnemonic || ''}`,
-                            is_submitted: true,
-                            paidAt: paidDateParsed
-                        }
-                    });
-                } catch (paymentLogErr) {
-                    console.error('[TPS BillPayment] Failed to log OrderPayment:', paymentLogErr);
-                }
             }
 
             // 8. Decide what happens to ConsumerNumber for the NEXT inquiry
@@ -320,10 +352,10 @@ const billPayment = async (req, res) => {
             });
         }
 
-        // 9. Update the tps_payment_logs entry with response_code_sent 00
+        // 9. Update the tps_payment_logs entry with response_code_sent 00 and status paid
         await prisma.tpsPaymentLog.update({
             where: { id: logEntry.id },
-            data: { response_code_sent: "00" }
+            data: { response_code_sent: "00", status: "paid" }
         });
 
         // 10. Return success response

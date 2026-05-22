@@ -13,9 +13,9 @@ async function generateConsumerNumber(imei, mobile) {
     let source = '';
     let conflictDigit = '';
 
-    if (imei && typeof imei === 'string' && imei.replace(/\D/g, '').length >= 5) {
+    if (imei && typeof imei === 'string' && imei.replace(/\D/g, '').length >= 6) {
         source = imei.replace(/\D/g, '');
-        conflictDigit = '9';
+        conflictDigit = '0';
     } else if (mobile && typeof mobile === 'string') {
         source = mobile.replace(/\D/g, '');
         conflictDigit = '8';
@@ -25,8 +25,8 @@ async function generateConsumerNumber(imei, mobile) {
         conflictDigit = '0';
     }
 
-    // Take the last 5 digits
-    let suffix = source.slice(-5).padStart(5, '0');
+    // Take the last 6 digits
+    let suffix = source.slice(-6).padStart(6, '0');
     let candidate = PREFIX + suffix;
 
     // Check uniqueness in consumer_numbers table
