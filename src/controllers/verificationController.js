@@ -5,6 +5,7 @@ const { sendOrderAssignmentNotification } = require('./ordersController');
 const { getPKTDate } = require("../utils/dateUtils");
 const { checkBlacklistStatus } = require('../utils/blacklistUtils');
 const { getNormalizedLedger } = require('../utils/ledgerUtils');
+const { getOrCreateCustomer, updateCsrRanking } = require('../services/rankingService');
 
 // Start Verification
 const startVerification = async (req, res) => {
@@ -314,7 +315,7 @@ const savePurchaserVerification = async (req, res) => {
     // ============================================================
     // 🔥 STEP 2: PURCHASER KI REAL DETAILS ORDER TABLE MEIN UPDATE KARO
     // ============================================================
-    
+
     await prisma.order.update({
       where: { id: ordersData.id },
       data: {
@@ -403,7 +404,7 @@ const savePurchaserVerification = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: 'Purchaser verification saved successfully!',
-      data: { 
+      data: {
         purchaser,
         order_updated: {
           customer_name: name,
@@ -1188,6 +1189,22 @@ const completeVerification = async (req, res) => {
     });
 
     await logOrderStatusChange(updatedVerification.order_id, 'in_progress', 'completed', req.user);
+
+    // FIX: Ensure customer is created/updated for CSR ranking logic
+    try {
+      const orderDb = await prisma.order.findUnique({
+        where: { id: updatedVerification.order_id }
+      });
+      if (orderDb) {
+        await getOrCreateCustomer(orderDb.id);
+        if (orderDb.created_by_user_id) {
+          await updateCsrRanking(orderDb.created_by_user_id, 'month');
+          await updateCsrRanking(orderDb.created_by_user_id, 'today');
+        }
+      }
+    } catch (e) {
+      console.error('Error auto-syncing customer/ranking:', e);
+    }
 
     const io = req.app.get('io');
     await notifyAdmins(
@@ -2273,9 +2290,9 @@ const getDeliveredProductDetails = async (req, res) => {
     }
 
     // Get IMEI from delivery or cash_in_hand
-    const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || 
-                      order.delivery?.product_imei || 
-                      order.imei_serial;
+    const imeiSerial = order.cash_in_hand?.[0]?.imei_serial ||
+      order.delivery?.product_imei ||
+      order.imei_serial;
 
     let inventoryDetails = null;
 
@@ -2300,43 +2317,43 @@ const getDeliveredProductDetails = async (req, res) => {
 
     // Extract delivery details
     let deliveryDetails = null;
-      if (order.delivery) {
-        // Fetch delivery agent details
-        let deliveryAgentName = null;
-        if (order.delivery.delivery_agent_id) {
-          const deliveryAgent = await prisma.user.findUnique({
-            where: { id: order.delivery.delivery_agent_id },
-            select: { full_name: true, username: true }
-          });
-          if (deliveryAgent) {
-            deliveryAgentName = `${deliveryAgent.full_name} (${deliveryAgent.username})`;
-          }
+    if (order.delivery) {
+      // Fetch delivery agent details
+      let deliveryAgentName = null;
+      if (order.delivery.delivery_agent_id) {
+        const deliveryAgent = await prisma.user.findUnique({
+          where: { id: order.delivery.delivery_agent_id },
+          select: { full_name: true, username: true }
+        });
+        if (deliveryAgent) {
+          deliveryAgentName = `${deliveryAgent.full_name} (${deliveryAgent.username})`;
         }
-        
-        deliveryDetails = {
-          id: order.delivery.id,
-          status: order.delivery.status,
-          start_time: order.delivery.start_time,
-          end_time: order.delivery.end_time,
-          feedback: order.delivery.feedback,
-          verified: order.delivery.verified,
-          product_imei: order.delivery.product_imei,
-          selected_plan: order.delivery.selected_plan,
-          self_pickup: order.delivery.self_pickup,
-          delivery_agent_id: order.delivery.delivery_agent_id,
-          delivery_agent_name: deliveryAgentName, // Add agent name here
-          uploads: order.delivery.uploads
-        };
       }
+
+      deliveryDetails = {
+        id: order.delivery.id,
+        status: order.delivery.status,
+        start_time: order.delivery.start_time,
+        end_time: order.delivery.end_time,
+        feedback: order.delivery.feedback,
+        verified: order.delivery.verified,
+        product_imei: order.delivery.product_imei,
+        selected_plan: order.delivery.selected_plan,
+        self_pickup: order.delivery.self_pickup,
+        delivery_agent_id: order.delivery.delivery_agent_id,
+        delivery_agent_name: deliveryAgentName, // Add agent name here
+        uploads: order.delivery.uploads
+      };
+    }
 
     // Extract advance payment details and installment ledger details
     let advancePayment = null;
     let installmentDetails = null;
     const ledger = order.installment_ledger || order.delivery?.installment_ledger;
-    
+
     if (ledger?.ledger_rows) {
       const normalized = getNormalizedLedger(ledger.ledger_rows);
-      
+
       // Derive advance payment from ledger
       if (normalized.advance_payment) {
         advancePayment = {
@@ -2419,7 +2436,7 @@ const getDeliveredProductDetails = async (req, res) => {
 // Get all delivered products for an outlet or officer
 const getDeliveredProductsList = async (req, res) => {
   const { page = 1, limit = 10, search = '', outlet_id } = req.query;
-  
+
   const skip = (Number(page) - 1) * Number(limit);
   const take = Number(limit);
 
@@ -2466,10 +2483,10 @@ const getDeliveredProductsList = async (req, res) => {
 
     // Enrich each order with inventory details
     const enrichedOrders = await Promise.all(orders.map(async (order) => {
-      const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || 
-                        order.delivery?.product_imei || 
-                        order.imei_serial;
-      
+      const imeiSerial = order.cash_in_hand?.[0]?.imei_serial ||
+        order.delivery?.product_imei ||
+        order.imei_serial;
+
       let inventoryDetails = null;
       if (imeiSerial) {
         const inventory = await prisma.outletInventory.findFirst({
@@ -2547,11 +2564,11 @@ const updateVerificationMedia = async (req, res) => {
       entity_id = verification.purchaser.id;
     } else if (person_type.startsWith('grantor')) {
       const grantorId = person_id ? parseInt(person_id) : null;
-      const grantor = verification.grantors.find(g => 
-        (grantorId && g.id === grantorId) || 
+      const grantor = verification.grantors.find(g =>
+        (grantorId && g.id === grantorId) ||
         (!grantorId && person_type === `grantor${g.grantor_number}`)
       );
-      
+
       if (!grantor) {
         return res.status(404).json({ success: false, error: 'Grantor record not found' });
       }

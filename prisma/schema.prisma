@@ -1145,6 +1145,7 @@ model TpsPaymentLog {
   bank_mnemonic             String
   reserved                  String?
   response_code_sent        String
+  status                    String?
   is_duplicate              Boolean  @default(false)
   created_at                DateTime @default(now())
 

@@ -115,10 +115,9 @@ async function updateCsrRanking(csrId, periodType = 'month') {
     // Metrics based on UNIQUE CUSTOMERS
     // We group orders by customer to count each customer once per status
     const customerStats = {};
-    
+
     orders.forEach(order => {
-        const cid = order.customer_id;
-        if (!cid) return;
+        const cid = order.customer_id || `null-${order.id}`;
         if (!customerStats[cid]) {
             customerStats[cid] = {
                 delivered: false,
@@ -129,12 +128,12 @@ async function updateCsrRanking(csrId, periodType = 'month') {
                 sales: 0
             };
         }
-        
+
         if (order.status === 'delivered') customerStats[cid].delivered = true;
         if (order.status === 'completed') customerStats[cid].completed = true;
         if (order.status === 'cancelled') customerStats[cid].cancelled = true;
         if (order.status === 'expired') customerStats[cid].expired = true;
-        
+
         if (order.status === 'delivered') {
             customerStats[cid].sales += (order.total_amount || 0);
         }
@@ -234,7 +233,7 @@ async function updateCsrRanking(csrId, periodType = 'month') {
 function getWorkingDaysLeftInMonth() {
     const now = getPKTDate();
     const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-    
+
     let workingDays = 0;
     let current = new Date(now);
     // Start from tomorrow
@@ -246,7 +245,7 @@ function getWorkingDaysLeftInMonth() {
         }
         current.setDate(current.getDate() + 1);
     }
-    
+
     return workingDays || 1; // At least 1 to avoid division by zero
 }
 
