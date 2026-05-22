@@ -1036,7 +1036,8 @@ const getOutletInstallments = async (req, res) => {
         search = '',
         tab = 'fresh', // 'fresh' or 'overdue'
         startDate,
-        endDate
+        endDate,
+        globalSearch
     } = req.query;
 
     const pageNum = Math.max(1, parseInt(page));
@@ -1047,13 +1048,14 @@ const getOutletInstallments = async (req, res) => {
     try {
         const orderWhere = {
             is_delivered: true,
-            ...(outlet_id && { outlet_id: outlet_id }),
+            ...((outlet_id && globalSearch !== 'true') && { outlet_id: outlet_id }),
             ...(q && {
                 OR: [
                     { customer_name: { contains: q } },
                     { order_ref: { contains: q } },
                     { whatsapp_number: { contains: q } },
                     { delivery: { product_imei: { contains: q } } },
+                    { delivery: { installment_ledger: { consumer_numbers: { some: { consumer_number: { contains: q } } } } } }
                 ],
             }),
         };
