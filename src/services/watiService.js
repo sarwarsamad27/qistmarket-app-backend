@@ -115,8 +115,8 @@ const sendInstallmentLedger = async (phone, {
   return sendTemplate(phone, WATI_LEDGER_TEMPLATE, WATI_LEDGER_BROADCAST, parameters);
 };
 
-const WATI_PAYMENT_RECEIVED_TEMPLATE = process.env.WATI_PAYMENT_RECEIVED_TEMPLATE || 'installment_payment_received';
-const WATI_PAYMENT_RECEIVED_BROADCAST = process.env.WATI_PAYMENT_RECEIVED_TEMPLATE || 'installment_payment_received';
+const WATI_PAYMENT_RECEIVED_TEMPLATE = process.env.WATI_INSTALLMENT_RECEIVED_TEMPLATE || 'installment_payment_receipt';
+const WATI_PAYMENT_RECEIVED_BROADCAST = process.env.WATI_INSTALLMENT_RECEIVED_TEMPLATE || 'installment_payment_receipt';
 
 const sendInstallmentPaymentReceipt = async (phone, {
   customerName,

@@ -1,5 +1,6 @@
 const prisma = require('../../lib/prisma');
 const { parseTpsAmount, formatTpsAmount, formatTpsAmountPaid } = require('../utils/tpsAmountUtils');
+const { sendInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TPS / 1LINK strict API Implementation
@@ -102,24 +103,47 @@ const billInquiry = async (req, res) => {
             });
         }
 
-        let calculatedAmountDue = Number(consumer.amount_due || 0);
+        let calculatedAmountDue = 0;
+        let inquiryDueDate = consumer.due_date ? toYYYYMMDD(consumer.due_date) : "        ";
 
-        // Check if due date is passed
-        if (consumer.due_date) {
+        const ledger = await prisma.installmentLedger.findUnique({
+            where: { id: consumer.ledger_id }
+        });
+
+        if (ledger && Array.isArray(ledger.ledger_rows)) {
             const today = new Date();
-            const due = new Date(consumer.due_date);
-            // Ignore time formatting and check Date boundaries if needed, but simple getTime works for standard due_dates.
-            if (today.getTime() > due.getTime()) {
-                const ledger = await prisma.installmentLedger.findUnique({
-                    where: { id: consumer.ledger_id }
-                });
-                if (ledger && Array.isArray(ledger.ledger_rows)) {
-                    const pendingRows = ledger.ledger_rows.filter(r => r.status === 'pending');
-                    if (pendingRows.length > 1) { // 0 is current, 1 is next
-                        calculatedAmountDue += Number(pendingRows[1].amount || pendingRows[1].dueAmount || 0);
+            today.setHours(0, 0, 0, 0);
+
+            let firstUnpaidFound = false;
+
+            for (const row of ledger.ledger_rows) {
+                if (row.status !== 'paid') {
+                    const expected = parseFloat(row.amount || row.dueAmount || 0);
+                    const paid = parseFloat(row.paid_amount || 0);
+                    const remaining = expected - paid;
+
+                    if (remaining > 0) {
+                        const dueDate = new Date(row.due_date || row.dueDate);
+                        
+                        // Add if due date is passed, or if it is the first unpaid row (current month)
+                        if (!firstUnpaidFound || dueDate.getTime() <= today.getTime()) {
+                            calculatedAmountDue += remaining;
+                            firstUnpaidFound = true;
+                        }
                     }
                 }
             }
+
+            // If the consumer's actual due date has passed, return today's date
+            if (consumer.due_date) {
+                const due = new Date(consumer.due_date);
+                due.setHours(0, 0, 0, 0);
+                if (today.getTime() > due.getTime()) {
+                    inquiryDueDate = toYYYYMMDD(new Date()); // return current date
+                }
+            }
+        } else {
+            calculatedAmountDue = Number(consumer.amount_due || 0);
         }
 
         // 00 = Valid consumer, active, bill unpaid, payment allowed
@@ -127,7 +151,7 @@ const billInquiry = async (req, res) => {
             response_Code: "00",
             consumer_detail: padCustomerName(consumer.customer_name),
             bill_status: "U",
-            due_date: toYYYYMMDD(consumer.due_date),
+            due_date: inquiryDueDate,
             amount_within_dueDate: formatTpsAmount(calculatedAmountDue),
             amount_after_dueDate: formatTpsAmount(calculatedAmountDue),
             billing_month: consumer.billing_month || "    ",
@@ -252,7 +276,18 @@ const billPayment = async (req, res) => {
 
         // Load ledger
         const ledger = await prisma.installmentLedger.findUnique({
-            where: { id: consumer.ledger_id }
+            where: { id: consumer.ledger_id },
+            include: {
+                order: {
+                    include: {
+                        delivery: true,
+                        cash_in_hand: true,
+                        verification: {
+                            include: { purchaser: true }
+                        }
+                    }
+                }
+            }
         });
 
         if (ledger && Array.isArray(ledger.ledger_rows)) {
@@ -262,17 +297,26 @@ const billPayment = async (req, res) => {
             let paymentApplied = false;
 
             for (let i = 0; i < rows.length; i++) {
-                if (rows[i].status === 'pending' && remainingAmount > 0) {
+                if (rows[i].status !== 'paid' && remainingAmount > 0) {
                     paymentApplied = true;
                     const expected = parseFloat(rows[i].amount || rows[i].dueAmount || 0);
+                    const alreadyPaid = parseFloat(rows[i].paid_amount || 0);
+                    const remainingForThisRow = expected - alreadyPaid;
 
                     let payThisRow = remainingAmount;
-                    if (remainingAmount >= expected && expected > 0) {
-                        payThisRow = expected;
+                    if (remainingAmount >= remainingForThisRow && remainingForThisRow > 0) {
+                        payThisRow = remainingForThisRow;
                     }
 
-                    rows[i].status = 'paid';
-                    rows[i].paid_amount = payThisRow;
+                    const newPaid = alreadyPaid + payThisRow;
+                    
+                    if (newPaid >= expected) {
+                        rows[i].status = 'paid';
+                    } else if (newPaid > 0) {
+                        rows[i].status = 'partial';
+                    }
+
+                    rows[i].paid_amount = newPaid;
                     rows[i].paid_at = paidDateParsed;
                     rows[i].payment_method = `1LINK TPS - ${bank_mnemonic || 'UNKNOWN'}`;
 
@@ -302,14 +346,97 @@ const billPayment = async (req, res) => {
                     where: { id: ledger.id },
                     data: { ledger_rows: rows }
                 });
+
+                // Send Wati Notification
+                if (ledger.order) {
+                    const order = ledger.order;
+                    const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+                    const customerName = order.verification?.purchaser?.name || order.customer_name;
+                    
+                    let productName = order.product_name;
+                    const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial || null;
+                    if (imeiSerial) {
+                        try {
+                            const invInfo = await prisma.outletInventory.findFirst({
+                                where: { imei_serial: imeiSerial },
+                                select: { product_name: true }
+                            });
+                            if (invInfo?.product_name) {
+                                productName = invInfo.product_name;
+                            }
+                        } catch (err) {
+                            console.error('[TPS BillPayment] Error fetching inventory product name:', err);
+                        }
+                    }
+
+                    if (phone) {
+                        sendInstallmentPaymentReceipt(phone, {
+                            customerName,
+                            amount: parsedAmountFinal,
+                            productName,
+                            orderRef: order.order_ref,
+                            date: paidDateParsed.toLocaleDateString('en-PK')
+                        }).catch(err => console.error('[TPS BillPayment] Wati Receipt Error:', err));
+                    }
+                }
             }
 
             // 8. Decide what happens to ConsumerNumber for the NEXT inquiry
-            const newPendingIndex = rows.findIndex(r => r.status === 'pending');
+            const newPendingIndex = rows.findIndex(r => r.status !== 'paid');
 
             if (newPendingIndex !== -1) {
                 // There is ANOTHER installment waiting for the future
                 const nextRow = rows[newPendingIndex];
+
+                if (paymentApplied && ledger.order) {
+                    const order = ledger.order;
+                    const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+                    if (phone) {
+                        let productName = order.product_name;
+                        const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial || null;
+                        if (imeiSerial) {
+                            try {
+                                const invInfo = await prisma.outletInventory.findFirst({
+                                    where: { imei_serial: imeiSerial },
+                                    select: { product_name: true }
+                                });
+                                if (invInfo?.product_name) {
+                                    productName = invInfo.product_name;
+                                }
+                            } catch (err) {}
+                        }
+
+                        sendNextInstallmentReminder(phone, {
+                            customerName: order.verification?.purchaser?.name || order.customer_name,
+                            productName,
+                            monthlyAmount: nextRow.amount || nextRow.dueAmount,
+                            dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
+                            ledgerUrl: ledger.token ? `${ledger.token}` : null
+                        }).catch(err => console.error('[TPS BillPayment] Wati Reminder Error:', err));
+                    }
+                }
+
+                // Calculate the accurate accumulated due amount including arrears
+                let accumulatedDue = 0;
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+                let firstFound = false;
+
+                for (const row of rows) {
+                    if (row.status !== 'paid') {
+                        const expected = parseFloat(row.amount || row.dueAmount || 0);
+                        const paid = parseFloat(row.paid_amount || 0);
+                        const remaining = expected - paid;
+
+                        if (remaining > 0) {
+                            const dueDate = new Date(row.due_date || row.dueDate);
+                            if (!firstFound || dueDate.getTime() <= today.getTime()) {
+                                accumulatedDue += remaining;
+                                firstFound = true;
+                            }
+                        }
+                    }
+                }
 
                 let bd = new Date();
                 let billingMonthStr = "0000";
@@ -325,7 +452,8 @@ const billPayment = async (req, res) => {
                     where: { id: consumer.id },
                     data: {
                         bill_status: 'U', // Cycle to Unpaid for the next month!
-                        amount_due: parseFloat(nextRow.amount || nextRow.dueAmount || 0),
+                        amount_due: accumulatedDue,
+
                         billing_month: billingMonthStr,
                         due_date: bd,
 

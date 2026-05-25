@@ -9,6 +9,7 @@ const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const admin = require('firebase-admin');
 const { getPKTDate, formatPKTDate } = require("../utils/dateUtils");
 const { generateConsumerNumber } = require('../utils/consumerNumberUtils');
+const { createOfficerTransaction } = require('../utils/officerTransactionUtils');
 
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -287,6 +288,17 @@ const submitDelivery = async (req, res) => {
           payment_method: 'Cash',
           created_at: getPKTDate(new Date())
         }
+      });
+
+      // Create Officer Transaction for this credit
+      await createOfficerTransaction({
+        officer_id: req.user.id,
+        type: 'credit',
+        amount: advanceAmount,
+        status: 'pending',
+        description: `Advance payment collected from ${confirmedCustomerName}`,
+        payment_method: 'Cash',
+        order_ref: order.order_ref
       });
     }
 
@@ -699,52 +711,24 @@ const getCashInHand = async (req, res) => {
       orderBy: { created_at: 'desc' }
     });
 
-    // === TRANSACTION HISTORY (Bank Statement Style) ===
-    let transactionHistory = [];
+    // === TRANSACTION HISTORY (From unified OfficerTransaction table) ===
+    let txWhere = { officer_id: deliveryBoyId };
+    if (status) txWhere.status = status;
+    if (where.created_at) txWhere.transaction_date = where.created_at;
 
-    // 1. CREDIT ENTRIES (Cash In Hand - jab paise officer ke paas aaye)
-    cashEntries.forEach(entry => {
-      transactionHistory.push({
-        id: `credit_${entry.id}`,
-        type: 'credit',
-        amount: entry.amount,
-        balance: entry.amount, // Balance at the time of credit is just the amount
-        status: entry.status,
-        description: `${entry.cash_type || 'Cash'} received from ${entry.customer_name || 'Customer'}`,
-        transaction_date: formatPKTDate(entry.created_at),
-        payment_method: entry.payment_method,
-        order_ref: entry.order?.order_ref || 'N/A'
-      });
-
-      // 2. DEBIT ENTRIES (Submissions - jab officer ne outlet ko pay kiya)
-      if (entry.submission_history && entry.submission_history.length > 0) {
-        entry.submission_history.forEach(sub => {
-          // If sub has a submission_ref, we'll group it later. 
-          // For now, we still push it to a collection that we will aggregate.
-          transactionHistory.push({
-            id: `debit_${sub.id}`,
-            type: 'debit',
-            amount: sub.amount_submitted,
-            status: 'paid',
-            description: `Cash submitted to outlet`,
-            transaction_date: formatPKTDate(sub.submission_date),
-            payment_method: entry.payment_method,
-            order_ref: entry.order?.order_ref || 'N/A',
-            submission_ref: sub.submission_ref // Added for grouping
-          });
-        });
-      }
+    const rawTransactions = await prisma.officerTransaction.findMany({
+      where: txWhere,
+      orderBy: { transaction_date: 'desc' }
     });
 
-    // === GROUP DEBITS BY SUBMISSION_REF ===
+    // We can group debits by submission_ref for display, similar to the old behavior
     const groupedHistory = [];
     const debitsByRef = {};
 
-    transactionHistory.forEach(item => {
+    rawTransactions.forEach(item => {
       if (item.type === 'credit') {
         groupedHistory.push(item);
       } else {
-        // It's a debit. Group by submission_ref if exists, else keep separate (fallback for old data)
         const ref = item.submission_ref || `individual_${item.id}`;
         if (!debitsByRef[ref]) {
           debitsByRef[ref] = {
@@ -761,10 +745,9 @@ const getCashInHand = async (req, res) => {
       }
     });
 
-    // Cleanup: convert Set to string and set the final description
     groupedHistory.forEach(item => {
-      if (item.type === 'debit') {
-        const refsArray = Array.from(item.order_refs || []);
+      if (item.type === 'debit' && item.order_refs) {
+        const refsArray = Array.from(item.order_refs);
         if (refsArray.length > 1) {
           item.description = `Combined submission for ${refsArray.length} orders`;
           item.order_ref = refsArray.join(', ');
@@ -775,7 +758,7 @@ const getCashInHand = async (req, res) => {
       }
     });
 
-    // Sort by transaction date (latest first)
+    // Re-sort just in case grouping affected order
     groupedHistory.sort((a, b) => new Date(b.transaction_date).getTime() - new Date(a.transaction_date).getTime());
 
     // Calculate totals and running balance correctly
@@ -891,6 +874,19 @@ const submitCashToOutlet = async (req, res) => {
     await prisma.cashSubmissionHistory.createMany({
       data: historyCreations
     });
+
+    // 3.1 Create OfficerTransaction records for debits sequentially to maintain correct balance
+    for (const hc of historyCreations) {
+      await createOfficerTransaction({
+        officer_id: deliveryBoyId,
+        type: 'debit',
+        amount: hc.amount_submitted,
+        status: 'paid',
+        description: `Cash submitted to outlet`,
+        payment_method: payment_method || 'Cash',
+        submission_ref: hc.submission_ref
+      });
+    }
 
     const officer = availableEntries[0]?.officer;
     const officerName = officer?.full_name || 'Officer';

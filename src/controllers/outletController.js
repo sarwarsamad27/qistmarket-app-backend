@@ -1240,6 +1240,7 @@ const getOutletInstallments = async (req, res) => {
             const advanceAmount = advancePayment.amount;
             const monthlyAmount = installmentLedger[0]?.dueAmount || plan?.monthly_amount || plan?.monthlyAmount || order.monthly_amount || 0;
             const totalMonths = installmentLedger.length || plan?.months || plan?.duration || order.months || 0;
+            const consumerNum = ledgerModel?.consumer_numbers?.[0]?.consumer_number || null;
 
             return {
                 order_id: order.id,
@@ -1262,6 +1263,9 @@ const getOutletInstallments = async (req, res) => {
                 })),
                 ledgerSummaries: {
                     advanceAmount,
+                    advancePaid: advancePayment.paid,
+                    advancePaidAt: advancePayment.paidAt,
+                    advancePaymentMethod: advancePayment.paymentMethod,
                     monthlyAmount,
                     totalMonths,
                     totalInstallmentDue: summary.totalInstallmentDue,
@@ -1270,23 +1274,64 @@ const getOutletInstallments = async (req, res) => {
                     totalArrears: summary.totalArrears,
                     paidInstallments: summary.paidInstallments,
                     totalInstallments: installmentLedger.length,
+                    grandTotalDue: summary.grandTotalDue,
+                    grandTotalPaid: summary.grandTotalPaid,
+                    grandTotalRemaining: summary.grandTotalRemaining,
                 },
                 installmentLedger,
                 ledger_short_id: ledgerModel?.token || null,
-                consumer_number: ledgerModel?.consumer_numbers?.[0]?.consumer_number || null,
+                consumer_number: consumerNum,
                 consumer_bill_status: ledgerModel?.consumer_numbers?.[0]?.bill_status || null,
                 recovery_officer: order.recovery_officer ? {
                     id: order.recovery_officer.id,
                     name: order.recovery_officer.full_name,
                     phone: order.recovery_officer.phone
-                } : null
+                } : null,
+                _consumerNum: consumerNum, // internal for TPS lookup
             };
+        });
+
+        // ── Fetch TPS payment logs for all consumer numbers in this page ────────
+        const allConsumerNums = formatted
+            .map(f => f._consumerNum)
+            .filter(Boolean);
+
+        let tpsLogsMap = {};
+        if (allConsumerNums.length > 0) {
+            const tpsLogs = await prisma.tpsPaymentLog.findMany({
+                where: {
+                    consumer_number: { in: allConsumerNums },
+                    response_code_sent: '00',
+                    is_duplicate: false
+                },
+                orderBy: { created_at: 'asc' }
+            });
+
+            for (const log of tpsLogs) {
+                if (!tpsLogsMap[log.consumer_number]) tpsLogsMap[log.consumer_number] = [];
+                tpsLogsMap[log.consumer_number].push({
+                    id: log.id,
+                    tran_auth_id: log.tran_auth_id,
+                    amount: Number(log.transaction_amount_parsed),
+                    bank_mnemonic: log.bank_mnemonic,
+                    tran_date: log.tran_date,
+                    tran_time: log.tran_time,
+                    created_at: log.created_at,
+                });
+            }
+        }
+
+        // Attach TPS logs + clean up internal field
+        const finalFormatted = formatted.map(f => {
+            const tpsPayments = f._consumerNum ? (tpsLogsMap[f._consumerNum] || []) : [];
+            const { _consumerNum, ...rest } = f;
+            return { ...rest, tpsPayments };
         });
 
         res.json({
             success: true,
             data: {
-                installments: formatted,
+                installments: finalFormatted,
                 totalRecovery,
                 overdueCount: overdueIds.length,
                 pagination: {

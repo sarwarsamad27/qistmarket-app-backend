@@ -1264,6 +1264,7 @@ const getVerificationByOrderId = async (req, res) => {
             delivery_assigned_at: true,
             recovery_assigned_at: true,
             verification_assigned_at: true,
+            postponed_feedback: true,
             created_by: { select: { username: true, full_name: true } },
             assigned_to: { select: { username: true, full_name: true } },
             delivery_officer: { select: { username: true, full_name: true } },
@@ -1273,6 +1274,19 @@ const getVerificationByOrderId = async (req, res) => {
                 user: { select: { username: true, full_name: true } }
               },
               orderBy: { created_at: 'desc' }
+            },
+            delivery: {
+              include: {
+                uploads: true
+              }
+            },
+            installment_ledger: true,
+            recovery_visits: {
+              include: {
+                photos: true,
+                officer: { select: { username: true, full_name: true } }
+              },
+              orderBy: { visit_time: 'desc' }
             }
           }
         },

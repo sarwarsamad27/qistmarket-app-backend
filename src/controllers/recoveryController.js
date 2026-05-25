@@ -10,6 +10,7 @@ const {
 const { logAction } = require('../utils/auditLogger');
 const { getPKTDate } = require('../utils/dateUtils');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
+const { createOfficerTransaction } = require('../utils/officerTransactionUtils');
 
 const getExpectedWorkMinutes = (startStr, endStr) => {
   if (!startStr || !endStr) return 480; // 8h default
@@ -664,6 +665,17 @@ const submitInstallment = async (req, res) => {
             created_at: getPKTDate(new Date()),
           }
         });
+
+        // Create Officer Transaction for this credit
+        await createOfficerTransaction({
+          officer_id: officerId,
+          type: 'credit',
+          amount: payingNow,
+          status: 'pending',
+          description: `Installment payment collected from ${order.verification?.purchaser?.name || order.customer_name}`,
+          payment_method: payment_method,
+          order_ref: order.order_ref
+        }, tx);
       }
 
       // Log the recovery visit along with payment

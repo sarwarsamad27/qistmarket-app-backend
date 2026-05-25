@@ -79,6 +79,7 @@ model User {
   collected_payments             OrderPayment[]            @relation("PaymentCollector")
   status_changes                 OrderStatusHistory[]      @relation("UserOrderStatusChanges")
   csr_rankings                   CsrRanking[]
+  officer_transactions           OfficerTransaction[]      @relation("OfficerTransactions")
 
   @@index([role_id])
   @@index([is_online])
@@ -1151,4 +1152,26 @@ model TpsPaymentLog {
 
   @@index([consumer_number, tran_auth_id, tran_date, tran_time])
   @@map("tps_payment_logs")
+}
+
+model OfficerTransaction {
+  id               Int      @id @default(autoincrement())
+  transaction_id   String   @unique
+  officer_id       Int
+  type             String   // 'credit' or 'debit'
+  amount           Float
+  balance          Float
+  status           String
+  description      String   @db.Text
+  transaction_date DateTime @default(now())
+  payment_method   String?
+  order_ref        String?
+  submission_ref   String?
+
+  officer          User     @relation("OfficerTransactions", fields: [officer_id], references: [id])
+  
+  @@index([officer_id])
+  @@index([transaction_date])
+  @@index([transaction_id])
+  @@map("officer_transactions")
 }
