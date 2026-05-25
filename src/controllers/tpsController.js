@@ -33,11 +33,16 @@ function toYYYYMMDD(dateObj) {
 // POST /api/1.0/Payments/BillInquiry
 // ─────────────────────────────────────────────────────────────────────────────
 const billInquiry = async (req, res) => {
-    const { consumer_number, bank_mnemonic, reserved } = req.body;
+    let { consumer_number, bank_mnemonic, reserved } = req.body;
 
     if (!consumer_number) {
         // 04 = Invalid data per spec
         return res.status(200).json({ response_Code: '04' });
+    }
+
+    consumer_number = String(consumer_number);
+    if (!consumer_number.startsWith('101710')) {
+        consumer_number = '101710' + consumer_number;
     }
 
     try {
@@ -144,7 +149,7 @@ const billInquiry = async (req, res) => {
 // POST /api/1.0/Payments/BillPayment
 // ─────────────────────────────────────────────────────────────────────────────
 const billPayment = async (req, res) => {
-    const {
+    let {
         consumer_number,
         tran_auth_id,
         transaction_amount,
@@ -153,6 +158,13 @@ const billPayment = async (req, res) => {
         bank_mnemonic,
         reserved
     } = req.body;
+
+    if (consumer_number) {
+        consumer_number = String(consumer_number);
+        if (!consumer_number.startsWith('101710')) {
+            consumer_number = '101710' + consumer_number;
+        }
+    }
 
     // 1. Validate auth headers (Already successfully handled by tpsAuth middleware)
 

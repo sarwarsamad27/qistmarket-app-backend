@@ -6,21 +6,27 @@
  */
 module.exports = function tpsAuth(req, res, next) {
     const authHeader = req.headers['authorization'] || '';
+    const headerUsername = req.headers['username'];
+    const headerPassword = req.headers['password'];
 
-    if (!authHeader.startsWith('Basic ')) {
+    let username, password;
+
+    if (authHeader.startsWith('Basic ')) {
+        try {
+            const decoded = Buffer.from(authHeader.slice(6), 'base64').toString('utf-8');
+            [username, password] = decoded.split(':');
+        } catch (e) {
+            return res.status(401).json({ error: 'Malformed Authorization header' });
+        }
+    } else if (headerUsername && headerPassword) {
+        // Fallback if client sends custom username and password headers
+        username = headerUsername;
+        password = headerPassword;
+    } else {
         return res.status(401).json({
-            error: 'Missing or Invalid Basic Auth header'
+            error: 'Missing or Invalid Auth header. Please provide Basic Auth or username/password headers.'
         });
     }
-
-    let decoded;
-    try {
-        decoded = Buffer.from(authHeader.slice(6), 'base64').toString('utf-8');
-    } catch (e) {
-        return res.status(401).json({ error: 'Malformed Authorization header' });
-    }
-
-    const [username, password] = decoded.split(':');
 
     const expectedUser = process.env.TLINK_API_USERNAME;
     const expectedPass = process.env.TLINK_API_PASSWORD;
