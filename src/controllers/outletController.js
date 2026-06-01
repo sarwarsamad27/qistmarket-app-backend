@@ -1151,8 +1151,6 @@ const getOutletInstallments = async (req, res) => {
                         installment_ledger: {
                             include: {
                                 consumer_numbers: {
-                                    take: 1,
-                                    orderBy: { created_at: 'desc' },
                                     select: {
                                         id: true,
                                         consumer_number: true,
@@ -1240,7 +1238,9 @@ const getOutletInstallments = async (req, res) => {
             const advanceAmount = advancePayment.amount;
             const monthlyAmount = installmentLedger[0]?.dueAmount || plan?.monthly_amount || plan?.monthlyAmount || order.monthly_amount || 0;
             const totalMonths = installmentLedger.length || plan?.months || plan?.duration || order.months || 0;
-            const consumerNum = ledgerModel?.consumer_numbers?.[0]?.consumer_number || null;
+            const allConsumers = ledgerModel?.consumer_numbers || [];
+            const consumerNum = allConsumers.find(c => c.consumer_number?.startsWith('1017'))?.consumer_number || allConsumers[0]?.consumer_number || null;
+            const smartpayConsumerNum = allConsumers.find(c => c.consumer_number?.startsWith('6002'))?.consumer_number || null;
 
             return {
                 order_id: order.id,
@@ -1281,7 +1281,8 @@ const getOutletInstallments = async (req, res) => {
                 installmentLedger,
                 ledger_short_id: ledgerModel?.token || null,
                 consumer_number: consumerNum,
-                consumer_bill_status: ledgerModel?.consumer_numbers?.[0]?.bill_status || null,
+                smartpay_consumer_number: smartpayConsumerNum,
+                consumer_bill_status: allConsumers.find(c => c.consumer_number === consumerNum)?.bill_status || null,
                 recovery_officer: order.recovery_officer ? {
                     id: order.recovery_officer.id,
                     name: order.recovery_officer.full_name,
@@ -1902,8 +1903,6 @@ const getOutletInstallmentsDueList = async (req, res) => {
                         installment_ledger: {
                             include: {
                                 consumer_numbers: {
-                                    take: 1,
-                                    orderBy: { created_at: 'desc' },
                                     select: {
                                         id: true,
                                         consumer_number: true,
@@ -2019,32 +2018,39 @@ const getOutletInstallmentsDueList = async (req, res) => {
                         method: matchedRawRow.payment_method || 'Cash'
                     }] : []);
 
-                    allInstallments.push({
-                        order_id: order.id,
-                        order_ref: order.order_ref,
-                        customer_name: purchaser?.name || order.customer_name,
-                        whatsapp_number: order.whatsapp_number,
-                        alternate_number: altNum,
-                        area: customerArea,
-                        dueDate: inst.dueDate,
-                        purchaseDate: order.created_at,
-                        grantor1Name: g1Name,
-                        grantor1Phone: g1Phone,
-                        grantor2Name: g2Name,
-                        grantor2Phone: g2Phone,
-                        product_name: invInfo?.product_name || cashRecord?.product_name || order.product_name,
-                        imei_serial: imeiSerial || 'N/A',
-                        monthlyAmount: inst.dueAmount,
-                        remainingAmount: summary.totalInstallmentRemaining, // remaining installment amount for order
-                        partialPayment: (inst.paidAmount > 0 && inst.status !== 'paid') ? inst.paidAmount : (inst.status === 'paid' ? inst.dueAmount : null),
-                        paidDate: matchedRawRow?.paid_at || inst.paidAt || null,
-                        paymentHistory: paymentHistory,
-                        note: installmentNote,
-                        monthNumber: inst.monthNumber,
-                        status: inst.status || 'pending',
-                        dueDateObj: instDate,
-                        consumer_number: ledgerModel?.consumer_numbers?.[0]?.consumer_number || null,
-                        consumer_bill_status: ledgerModel?.consumer_numbers?.[0]?.bill_status || null,
+                        const allConsumers = ledgerModel?.consumer_numbers || [];
+                        const consumerNum = allConsumers.find(c => c.consumer_number?.startsWith('1017'))?.consumer_number || allConsumers[0]?.consumer_number || null;
+                        const smartpayConsumerNum = allConsumers.find(c => c.consumer_number?.startsWith('6002'))?.consumer_number || null;
+                        
+                        allInstallments.push({
+                            // ... (rest of properties are pushed correctly, we just inject the variables here)
+                            order_id: order.id,
+                            order_ref: order.order_ref,
+                            customer_name: purchaser?.name || order.customer_name,
+                            whatsapp_number: order.whatsapp_number,
+                            alternate_number: altNum,
+                            area: customerArea,
+                            dueDate: inst.dueDate,
+                            purchaseDate: order.created_at,
+                            grantor1Name: g1Name,
+                            grantor1Phone: g1Phone,
+                            grantor2Name: g2Name,
+                            grantor2Phone: g2Phone,
+                            product_name: invInfo?.product_name || cashRecord?.product_name || order.product_name,
+                            imei_serial: imeiSerial || 'N/A',
+                            monthlyAmount: inst.dueAmount,
+                            remainingAmount: summary.totalInstallmentRemaining, // remaining installment amount for order
+                            partialPayment: (inst.paidAmount > 0 && inst.status !== 'paid') ? inst.paidAmount : (inst.status === 'paid' ? inst.dueAmount : null),
+                            paidDate: matchedRawRow?.paid_at || inst.paidAt || null,
+                            paymentHistory: paymentHistory,
+                            payment_history: paymentHistory,
+                            note: installmentNote,
+                            monthNumber: inst.monthNumber,
+                            status: inst.status || 'pending',
+                            dueDateObj: instDate,
+                            consumer_number: consumerNum,
+                            smartpay_consumer_number: smartpayConsumerNum,
+                            consumer_bill_status: allConsumers.find(c => c.consumer_number === consumerNum)?.bill_status || null,
                         recovery_officer: order.recovery_officer ? {
                             id: order.recovery_officer.id,
                             name: order.recovery_officer.full_name,

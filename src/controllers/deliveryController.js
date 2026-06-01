@@ -8,7 +8,7 @@ const { notifyUser, notifyAdmins, notifyOutlet } = require('../utils/notificatio
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const admin = require('firebase-admin');
 const { getPKTDate, formatPKTDate } = require("../utils/dateUtils");
-const { generateConsumerNumber } = require('../utils/consumerNumberUtils');
+const { generateConsumerNumber, generateSmartPayConsumerNumber } = require('../utils/consumerNumberUtils');
 const { createOfficerTransaction } = require('../utils/officerTransactionUtils');
 
 if (!admin.apps.length) {
@@ -389,6 +389,7 @@ const submitDelivery = async (req, res) => {
 
         const mobile = purchaser?.telephone_number || order.whatsapp_number;
         const consumerNo = await generateConsumerNumber(product_imei, mobile);
+        const smartPayConsumerNo = await generateSmartPayConsumerNumber(product_imei, mobile);
 
         // Save the consumer_numbers record 
         // using the new table as specified by 1Bill TPS spec
@@ -409,22 +410,36 @@ const submitDelivery = async (req, res) => {
         }
 
         try {
-          await prisma.consumerNumber.create({
-            data: {
-              consumer_number: consumerNo,
-              ledger_id: installmentLedger.id,
-              delivery_id: delivery.id,
-              customer_name: purchaser?.name || order.customer_name || 'N/A',
-              mobile_number: mobile || 'N/A',
-              imei_serial: product_imei || null,
-              amount_due: firstMonthDue,
-              billing_month: billingMonthStr,
-              due_date: dueDate,
-              bill_status: 'U', // Unpaid
-            }
+          await prisma.consumerNumber.createMany({
+            data: [
+              {
+                consumer_number: consumerNo,
+                ledger_id: installmentLedger.id,
+                delivery_id: delivery.id,
+                customer_name: purchaser?.name || order.customer_name || 'N/A',
+                mobile_number: mobile || 'N/A',
+                imei_serial: product_imei || null,
+                amount_due: firstMonthDue,
+                billing_month: billingMonthStr,
+                due_date: dueDate,
+                bill_status: 'U', // Unpaid
+              },
+              {
+                consumer_number: smartPayConsumerNo,
+                ledger_id: installmentLedger.id,
+                delivery_id: delivery.id,
+                customer_name: purchaser?.name || order.customer_name || 'N/A',
+                mobile_number: mobile || 'N/A',
+                imei_serial: product_imei || null,
+                amount_due: firstMonthDue,
+                billing_month: billingMonthStr,
+                due_date: dueDate,
+                bill_status: 'U', // Unpaid
+              }
+            ]
           });
         } catch (consumerErr) {
-          console.error('[submitDelivery] Failed to create ConsumerNumber (Non-fatal):', consumerErr);
+          console.error('[submitDelivery] Failed to create ConsumerNumbers (Non-fatal):', consumerErr);
         }
 
       }
@@ -785,65 +800,46 @@ const getCashInHand = async (req, res) => {
 };
 
 const submitCashToOutlet = async (req, res) => {
-  const { cash_in_hand_ids, cash_in_hand_id, outlet_id, payment_method, submit_amount } = req.body;
+  const { outlet_id, payment_method, submit_amount } = req.body;
   const deliveryBoyId = req.user?.id;
-
-  let ids = [];
-  if (cash_in_hand_ids && Array.isArray(cash_in_hand_ids)) {
-    ids = cash_in_hand_ids.map(id => parseInt(id));
-  } else if (cash_in_hand_id) {
-    ids = [parseInt(cash_in_hand_id)];
-  }
 
   if (!outlet_id) {
     return res.status(400).json({ success: false, message: 'outlet_id is required' });
   }
 
   try {
-    // 1. Fetch available pending entries
-    let queryArgs = {
-      officer_id: deliveryBoyId,
-      status: 'pending'
-    };
-
-    if (ids.length > 0) {
-      // Filter out any NaN or invalid IDs
-      const validIds = ids.filter(id => !isNaN(id) && id > 0);
-      if (validIds.length > 0) {
-        queryArgs.id = { in: validIds };
-      }
-    }
-
-    const availableEntries = await prisma.cashInHand.findMany({
-      where: queryArgs,
-      orderBy: { created_at: 'desc' }, // Latest first for LIFO
+    // 1. Fetch all cash entries to calculate bank-like balance
+    let availableEntries = await prisma.cashInHand.findMany({
+      where: { officer_id: deliveryBoyId },
+      orderBy: { created_at: 'asc' }, // FIFO: Oldest first
       include: {
         officer: { select: { id: true, full_name: true, phone: true, fcm_token: true } },
         order: { select: { product_name: true, order_ref: true } }
       }
     });
 
-    if (availableEntries.length === 0) {
-      return res.status(404).json({ success: false, message: 'No pending cash entries found to submit' });
-    }
+    const totalCredits = availableEntries.reduce((sum, e) => sum + e.amount, 0);
+    const totalDebits = availableEntries.reduce((sum, e) => sum + (e.submitted_amount || 0), 0);
+    const currentBalance = totalCredits - totalDebits;
 
-    // Calculate maximum available to submit
-    let totalPendingAvailable = 0;
-    availableEntries.forEach(e => {
-      totalPendingAvailable += (e.amount - (e.submitted_amount || 0));
-    });
+    if (currentBalance <= 0) {
+      return res.status(400).json({ success: false, message: 'Your current cash balance is zero. No cash to submit.' });
+    }
 
     let amountToSubmit = parseFloat(submit_amount);
     if (isNaN(amountToSubmit) || amountToSubmit <= 0) {
-      amountToSubmit = totalPendingAvailable; // Default to full submission
+      amountToSubmit = currentBalance; // Default to full submission
     }
 
-    if (amountToSubmit > totalPendingAvailable) {
+    if (amountToSubmit > currentBalance) {
       return res.status(400).json({
         success: false,
-        message: `Cannot submit more than available pending cash (PKR ${totalPendingAvailable})`
+        message: `Cannot submit more than your current balance (PKR ${currentBalance})`
       });
     }
+
+    // Filter out only entries that have remaining balance for FIFO distribution
+    availableEntries = availableEntries.filter(e => (e.amount - (e.submitted_amount || 0)) > 0);
 
     const otp = Math.floor(1000 + Math.random() * 9000).toString();
     const submissionRef = `SUB-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
@@ -1838,6 +1834,7 @@ const submitSelfPickupDelivery = async (req, res) => {
         // -------------------------------------------------------------
         const mobile = purchaser?.telephone_number || order.whatsapp_number;
         const consumerNo = await generateConsumerNumber(product_imei, mobile);
+        const smartPayConsumerNo = await generateSmartPayConsumerNumber(product_imei, mobile);
 
         let firstMonthDue = 0;
         let dueDate = getPKTDate();
@@ -1856,22 +1853,36 @@ const submitSelfPickupDelivery = async (req, res) => {
         }
 
         try {
-          await prisma.consumerNumber.create({
-            data: {
-              consumer_number: consumerNo,
-              ledger_id: installmentLedger.id,
-              delivery_id: delivery.id,
-              customer_name: confirmedCustomerName || order.customer_name || 'N/A',
-              mobile_number: mobile || 'N/A',
-              imei_serial: product_imei || null,
-              amount_due: firstMonthDue,
-              billing_month: billingMonthStr,
-              due_date: dueDate,
-              bill_status: 'U', // Unpaid
-            }
+          await prisma.consumerNumber.createMany({
+            data: [
+              {
+                consumer_number: consumerNo,
+                ledger_id: installmentLedger.id,
+                delivery_id: delivery.id,
+                customer_name: confirmedCustomerName || order.customer_name || 'N/A',
+                mobile_number: mobile || 'N/A',
+                imei_serial: product_imei || null,
+                amount_due: firstMonthDue,
+                billing_month: billingMonthStr,
+                due_date: dueDate,
+                bill_status: 'U', // Unpaid
+              },
+              {
+                consumer_number: smartPayConsumerNo,
+                ledger_id: installmentLedger.id,
+                delivery_id: delivery.id,
+                customer_name: confirmedCustomerName || order.customer_name || 'N/A',
+                mobile_number: mobile || 'N/A',
+                imei_serial: product_imei || null,
+                amount_due: firstMonthDue,
+                billing_month: billingMonthStr,
+                due_date: dueDate,
+                bill_status: 'U', // Unpaid
+              }
+            ]
           });
         } catch (consumerErr) {
-          console.error('[submitSelfPickupDelivery] Failed to create ConsumerNumber (Non-fatal):', consumerErr);
+          console.error('[submitSelfPickupDelivery] Failed to create ConsumerNumbers (Non-fatal):', consumerErr);
         }
 
       }

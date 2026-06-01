@@ -320,6 +320,24 @@ const billPayment = async (req, res) => {
                     rows[i].paid_at = paidDateParsed;
                     rows[i].payment_method = `1LINK TPS - ${bank_mnemonic || 'UNKNOWN'}`;
 
+                    // Maintain cumulative payment history for this installment row
+                    if (!rows[i].payment_history) {
+                        rows[i].payment_history = [];
+                        // Backfill previous paid amount as first entry if this row was already partially paid
+                        if (alreadyPaid > 0) {
+                            rows[i].payment_history.push({
+                                amount: alreadyPaid,
+                                date: rows[i].paid_at || paidDateParsed,
+                                method: rows[i].payment_method || '1LINK TPS'
+                            });
+                        }
+                    }
+                    rows[i].payment_history.push({
+                        amount: payThisRow,
+                        date: paidDateParsed,
+                        method: `1LINK TPS - ${bank_mnemonic || 'UNKNOWN'}`
+                    });
+
                     remainingAmount -= payThisRow;
 
                     try {

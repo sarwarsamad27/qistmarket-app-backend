@@ -93,6 +93,9 @@ function getNormalizedLedger(rows) {
         paidAt: row.paid_at || null,
         paymentMethod: row.payment_method || null,
         arrears: row.arrears || 0,
+        // Preserve full partial-payment history for both naming conventions
+        paymentHistory: row.payment_history || row.paymentHistory || [],
+        payment_history: row.payment_history || row.paymentHistory || [],
     }));
 
     const totalInstallmentDue = installmentLedger.reduce((sum, r) => sum + r.dueAmount, 0);

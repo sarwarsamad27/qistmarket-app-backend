@@ -924,14 +924,15 @@ model Zone {
 }
 
 model SmartPayQr {
-  id              Int      @id @default(autoincrement())
+  id              Int       @id @default(autoincrement())
   order_id        Int
   month_number    Int
-  qr_string       String   @db.Text
-  qr_image_base64 String   @db.LongText
+  qr_string       String    @db.Text
+  qr_image_base64 String    @db.LongText
   amount          Float
-  created_at      DateTime @default(now())
-  order           Order    @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  expires_at      DateTime?
+  created_at      DateTime  @default(now())
+  order           Order     @relation(fields: [order_id], references: [id], onDelete: Cascade)
 
   @@unique([order_id, month_number])
   @@index([order_id])
@@ -1174,4 +1175,19 @@ model OfficerTransaction {
   @@index([transaction_date])
   @@index([transaction_id])
   @@map("officer_transactions")
+}
+
+model SmartPayPaymentLog {
+  id                        Int      @id @default(autoincrement())
+  consumer_number           String
+  transactionId             String
+  amount                    Decimal  @db.Decimal(10, 2)
+  timestamp                 String
+  billnumber                String
+  status                    String?
+  is_duplicate              Boolean  @default(false)
+  created_at                DateTime @default(now())
+
+  @@index([consumer_number, transactionId, timestamp])
+  @@map("smartpay_payment_logs")
 }

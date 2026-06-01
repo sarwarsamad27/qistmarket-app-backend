@@ -1,7 +1,8 @@
 // index.js / server.js
-
-require('dotenv').config();
+process.env.TZ = 'Asia/Karachi';
 const prisma = require('./lib/prisma');
+console.log('Date test:', new Date());
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -12,6 +13,7 @@ const jwt = require('jsonwebtoken');
 // ────────────────────────────────────────────────
 // Route Imports
 // ────────────────────────────────────────────────
+const smartPayWebhookRoutes = require('./src/routes/smartPayWebhookRoutes');
 const ledgerRoutes = require('./src/routes/ledgerRoutes');
 const appVersionRoutes = require('./src/routes/appVersionRoutes');
 const authRoutes = require('./src/routes/authRoutes');
@@ -424,6 +426,7 @@ app.get('/', (req, res) => {
 // ────────────────────────────────────────────────
 // Routes
 // ────────────────────────────────────────────────
+app.use('/api/smartpay/webhook', smartPayWebhookRoutes);
 app.use('/ledger', ledgerRoutes);
 app.use('/api/app-version', appVersionRoutes);   // Public ledger routes — no auth required, must be first!
 app.use('/api/ledger', ledgerRoutes);
