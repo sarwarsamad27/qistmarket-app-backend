@@ -467,6 +467,7 @@ const createOrder = async (req, res) => {
         channel: channel.trim(),
         status: assignedOfficerId ? 'pending' : 'new',
         created_at: new Date(),
+        updated_at: new Date(),
         created_by_user_id: req.user.id,
         outlet_id: currentUser?.outlet_id || null,
         assigned_to_user_id: assignedOfficerId,
