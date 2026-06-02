@@ -3363,6 +3363,7 @@ const createConvertedSale = async (req, res) => {
         channel: orderData.channel || 'Repeat Customer',
         status: status,
         created_at: new Date(),
+        updated_at: new Date(),
         created_by_user_id: req.user.id,
         outlet_id: orderData.outlet_id || currentUser?.outlet_id || null,
         is_repeat_customer: true
