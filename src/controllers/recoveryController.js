@@ -8,7 +8,6 @@ const {
   sendNextInstallmentReminder
 } = require('../services/watiService');
 const { logAction } = require('../utils/auditLogger');
-const { getPKTDate } = require('../utils/dateUtils');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
 const { createOfficerTransaction } = require('../utils/officerTransactionUtils');
 
@@ -662,7 +661,7 @@ const submitInstallment = async (req, res) => {
             payment_method: payment_method,
             cash_type: 'Installment payment',         
             submitted_amount: 0,                                              
-            created_at: getPKTDate(new Date()),
+            created_at: new Date(),
           }
         });
 
@@ -828,7 +827,7 @@ const replaceRecoveryVisitPhoto = async (req, res) => {
       where: { id: parseInt(photo_id) },
       data: {
         file_url: req.file.url,
-        uploaded_at: getPKTDate(new Date())
+        uploaded_at: new Date()
       },
       include: {
         recovery_visit: {
@@ -855,7 +854,7 @@ const replaceRecoveryVisitPhoto = async (req, res) => {
           new_value: updated.file_url,
           edited_by_id: req.user.id,
           edited_by_name: req.user.full_name,
-          edited_at: getPKTDate(new Date())
+          edited_at: new Date()
         }
       });
     }

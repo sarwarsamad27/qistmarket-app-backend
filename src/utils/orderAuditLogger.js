@@ -1,5 +1,4 @@
 const prisma = require('../../lib/prisma');
-const { getPKTDate } = require("../utils/dateUtils");
 const { sendOrderStatusNotification } = require('../services/watiService');
 const { updateCsrRanking } = require('../services/rankingService');
 
@@ -55,7 +54,7 @@ async function logOrderStatusChange(order_id, old_status, new_status, user, rema
         user_id: user?.id ? parseInt(user.id) : null,
         role_name: user?.role || user?.role_name || null,
         remarks: finalRemarks,
-        created_at: getPKTDate(new Date()),
+        created_at: new Date(),
       }
     });
 

@@ -3,7 +3,6 @@ const { logOrderStatusChange } = require('../utils/orderAuditLogger');
 const crypto = require('crypto');
 const axios = require('axios');
 const { notifyUser, notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
-const { getPKTDate } = require("../utils/dateUtils");
 const { logAction } = require('../utils/auditLogger');
 const { sendOTP, sendTemplate, sendOrderStatusNotification } = require('../services/watiService');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
@@ -119,7 +118,7 @@ function countSundaysBetween(start, end) {
 
 
 const expireOrders = async (io = null) => {
-  const now = getPKTDate();
+  const now = new Date();
   const statuses = ['new', 'transferred', 'pending', 'in_progress', 'completed', 'approved'];
 
   // Fetch all orders that might be eligible for expiration
@@ -211,7 +210,7 @@ const expireOrders = async (io = null) => {
       id: order.id,
       order_ref: order.order_ref,
       previous_status: order.status,
-      updated_at: getPKTDate().toISOString(),
+      updated_at: new Date(),
     };
 
     // Emit Socket.IO events for real-time updates (for list refreshing)
@@ -467,7 +466,7 @@ const createOrder = async (req, res) => {
         months: parseInt(months),
         channel: channel.trim(),
         status: assignedOfficerId ? 'pending' : 'new',
-        created_at: getPKTDate(new Date()),
+        created_at: new Date(),
         created_by_user_id: req.user.id,
         outlet_id: currentUser?.outlet_id || null,
         assigned_to_user_id: assignedOfficerId,
@@ -666,7 +665,7 @@ const cancelWebsiteOrderFeedItem = async (req, res) => {
           status: 'cancelled',
           cancelled_reason: reason,
           cancelled_at: new Date(),
-          created_at: getPKTDate(new Date()),
+          created_at: new Date(),
           created_by_user_id: req.user.id,
           order_notes: `Website Cancelled: ${websiteOrder.tokenNumber}. Reason: ${reason}`
         }
@@ -754,7 +753,7 @@ const createOrderFromWebsitePickup = async (req, res) => {
         months: parseInt(months),
         channel: channel || 'Website',
         status: 'new',
-        created_at: getPKTDate(new Date()),
+        created_at: new Date(),
         created_by_user_id: req.user.id,
         assigned_to_user_id: null,
         verification_assigned_at: null,
@@ -1143,7 +1142,7 @@ const getCsrDashboardStats = async (req, res) => {
     }
 
     // Date range calculation using PKT
-    const now = getPKTDate();
+    const now = new Date();
     let start, end;
 
     if (filter === 'today') {
@@ -1526,7 +1525,7 @@ const getCsrDashboardStats = async (req, res) => {
       success: true,
       data: {
         filter,
-        dateRange: { start: start.toISOString(), end: end.toISOString() },
+        dateRange: { start: start, end: end },
         isCsr,
         totalOrders,
         statusCounts: {
@@ -1912,7 +1911,7 @@ const assignOrder = async (req, res) => {
       where: { id: parseInt(id) },
       data: {
         assigned_to_user_id: parseInt(user_id),
-        verification_assigned_at: getPKTDate(new Date()),
+        verification_assigned_at: new Date(),
         status: order.status === 'in_progress' ? 'in_progress' : 'pending'
       },
       include: {
@@ -2002,7 +2001,7 @@ const assignBulk = async (req, res) => {
       order_id: parseInt(id),
       verification_officer_id: parseInt(user_id),
       status: 'pending',
-      start_time: getPKTDate(new Date())
+      start_time: new Date()
     }));
 
     await prisma.$transaction([
@@ -2014,7 +2013,7 @@ const assignBulk = async (req, res) => {
         },
         data: {
           assigned_to_user_id: parseInt(user_id),
-          verification_assigned_at: getPKTDate(new Date()),
+          verification_assigned_at: new Date(),
           status: 'pending'
         }
       }),
@@ -2026,7 +2025,7 @@ const assignBulk = async (req, res) => {
         },
         data: {
           assigned_to_user_id: parseInt(user_id),
-          verification_assigned_at: getPKTDate(new Date()),
+          verification_assigned_at: new Date(),
           status: 'in_progress'
         }
       }),
@@ -2472,7 +2471,7 @@ const assignDelivery = async (req, res) => {
       where: { id: Number(id) },
       data: {
         delivery_officer_id: Number(user_id),
-        delivery_assigned_at: getPKTDate(new Date()),
+        delivery_assigned_at: new Date(),
         status: 'picked'
       },
       include: {
@@ -2556,7 +2555,7 @@ const assignBulkDelivery = async (req, res) => {
       where: { id: { in: order_ids.map(Number) } },
       data: {
         delivery_officer_id: Number(user_id),
-        delivery_assigned_at: getPKTDate(new Date()),
+        delivery_assigned_at: new Date(),
         status: 'picked'
       }
     });
@@ -2844,7 +2843,7 @@ const assignRecovery = async (req, res) => {
       where: { id: parseInt(id) },
       data: {
         recovery_officer_id: parseInt(user_id),
-        recovery_assigned_at: getPKTDate(new Date())
+        recovery_assigned_at: new Date()
       },
       include: {
         recovery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true } }
@@ -2876,7 +2875,7 @@ const assignBulkRecovery = async (req, res) => {
       where: { id: { in: order_ids.map(Number) } },
       data: {
         recovery_officer_id: parseInt(user_id),
-        recovery_assigned_at: getPKTDate(new Date())
+        recovery_assigned_at: new Date()
       },
     });
 
@@ -3363,7 +3362,7 @@ const createConvertedSale = async (req, res) => {
         months: parseInt(orderData.months),
         channel: orderData.channel || 'Repeat Customer',
         status: status,
-        created_at: getPKTDate(new Date()),
+        created_at: new Date(),
         created_by_user_id: req.user.id,
         outlet_id: orderData.outlet_id || currentUser?.outlet_id || null,
         is_repeat_customer: true

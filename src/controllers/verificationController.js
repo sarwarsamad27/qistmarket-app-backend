@@ -2,7 +2,6 @@ const prisma = require('../../lib/prisma');
 const { logOrderStatusChange } = require('../utils/orderAuditLogger');
 const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { sendOrderAssignmentNotification } = require('./ordersController');
-const { getPKTDate } = require("../utils/dateUtils");
 const { checkBlacklistStatus } = require('../utils/blacklistUtils');
 const { getNormalizedLedger } = require('../utils/ledgerUtils');
 const { getOrCreateCustomer, updateCsrRanking } = require('../services/rankingService');
@@ -39,7 +38,7 @@ const startVerification = async (req, res) => {
         order_id: parseInt(order_id),
         verification_officer_id: req.user.id,
         status: 'in_progress',
-        start_time: getPKTDate(new Date())
+        start_time: new Date()
       },
       include: {
         order: { select: { order_ref: true } },
@@ -51,7 +50,7 @@ const startVerification = async (req, res) => {
       where: { id: parseInt(order_id) },
       data: {
         status: 'in_progress',
-        updated_at: getPKTDate(new Date()),
+        updated_at: new Date(),
       }
     });
 
@@ -289,7 +288,7 @@ const savePurchaserVerification = async (req, res) => {
           street: ordersData.street,
           zone: ordersData.zone,
           alternate_contact: ordersData.alternate_contact,
-          moved_at: getPKTDate(new Date())
+          moved_at: new Date()
         }
       });
     } else {
@@ -307,7 +306,7 @@ const savePurchaserVerification = async (req, res) => {
           street: ordersData.street,
           zone: ordersData.zone,
           alternate_contact: ordersData.alternate_contact,
-          moved_at: getPKTDate(new Date())
+          moved_at: new Date()
         }
       });
     }
@@ -329,7 +328,7 @@ const savePurchaserVerification = async (req, res) => {
         street: present_street,
         zone: present_zone,
         alternate_contact: telephone_number,
-        updated_at: getPKTDate(new Date())
+        updated_at: new Date()
       }
     });
 
@@ -661,7 +660,7 @@ const saveLocation = async (req, res) => {
         longitude: parseFloat(longitude),
         accuracy: accuracy ? parseFloat(accuracy) : null,
         label,
-        timestamp: getPKTDate(new Date())
+        timestamp: new Date()
       }
     });
 
@@ -715,7 +714,7 @@ const saveVerificationLocation = async (req, res) => {
         label,
         person_type,
         person_id: person_id ? parseInt(person_id) : null,
-        created_at: getPKTDate(new Date())
+        created_at: new Date()
       }
     });
 
@@ -861,7 +860,7 @@ const uploadPurchaserDocument = async (req, res) => {
         person_id: purchaser.id,
         file_url: req.file.url,
         label: `${document_type} - Purchaser`,
-        uploaded_at: getPKTDate(new Date())
+        uploaded_at: new Date()
       }
     });
 
@@ -919,7 +918,7 @@ const uploadGrantorDocument = async (req, res) => {
         person_id: grantor.id,
         file_url: req.file.url,
         label: `${document_type} - Grantor ${grantor_number}`,
-        uploaded_at: getPKTDate(new Date())
+        uploaded_at: new Date()
       }
     });
 
@@ -985,7 +984,7 @@ const uploadPhoto = async (req, res) => {
         person_id: person_id ? parseInt(person_id) : null,
         file_url: req.file.url,
         label: label || `Photo - ${person_type}`,
-        uploaded_at: getPKTDate(new Date())
+        uploaded_at: new Date()
       }
     });
 
@@ -1036,7 +1035,7 @@ const uploadSignature = async (req, res) => {
         person_id: person_id ? parseInt(person_id) : null,
         file_url: req.file.url,
         label: `Signature - ${person_type}`,
-        uploaded_at: getPKTDate(new Date())
+        uploaded_at: new Date()
       }
     });
 
@@ -1163,7 +1162,7 @@ const completeVerification = async (req, res) => {
       where: { id: parseInt(verification_id) },
       data: {
         status: 'completed',
-        end_time: getPKTDate(new Date()),
+        end_time: new Date(),
         home_location_required: home_location_required === true || home_location_required === 'true',
         verification_feedback: feedback || null
       },
@@ -1183,7 +1182,7 @@ const completeVerification = async (req, res) => {
       where: { id: updatedVerification.order_id },
       data: {
         status: 'completed',
-        updated_at: getPKTDate(new Date()),
+        updated_at: new Date(),
         outlet_id: updatedVerification.verification_officer?.outlet_id || null // Route back to the officer's outlet
       }
     });
@@ -1420,7 +1419,7 @@ const submitVerificationReview = async (req, res) => {
         reviewer_id: req.user.id,
         approved,
         remarks: finalRemarks,
-        created_at: getPKTDate(new Date())
+        created_at: new Date()
       }
     });
 
@@ -1457,7 +1456,7 @@ const submitVerificationReview = async (req, res) => {
           where: { id: verification.order.id },
           data: {
             status: orderStatusUpdate,
-            updated_at: getPKTDate(new Date()),
+            updated_at: new Date(),
           }
         })
       );
@@ -1813,8 +1812,8 @@ const getMyCustomersWithOrdersAndLedger = async (req, res) => {
         token_number: order.token_number,
         status: order.status,
         is_delivered: true,
-        delivery_date: deliveryDate ? deliveryDate.toISOString() : null,
-        created_at: order.created_at.toISOString(),
+        delivery_date: deliveryDate ? deliveryDate : null,
+        created_at: order.created_at,
         verification_status: order.verification?.status || null,
 
         product_details: {
@@ -1897,7 +1896,7 @@ const recordEditHistory = async (
         new_value: new_value ? String(new_value) : null,
         edited_by_id: parseInt(edited_by_id),
         edited_by_name,
-        edited_at: getPKTDate(new Date())
+        edited_at: new Date()
       }
     });
 
@@ -2214,7 +2213,7 @@ const updateLocationVerified = async (req, res) => {
         label,
         person_type,
         person_id: person_id ? parseInt(person_id) : null,
-        created_at: getPKTDate(new Date())
+        created_at: new Date()
       }
     });
 
@@ -2601,7 +2600,7 @@ const updateVerificationMedia = async (req, res) => {
           where: { id: existingDoc.id },
           data: {
             file_url: req.file.url,
-            uploaded_at: getPKTDate(new Date())
+            uploaded_at: new Date()
           }
         });
       }
@@ -2614,7 +2613,7 @@ const updateVerificationMedia = async (req, res) => {
           person_id: entity_id,
           file_url: req.file.url,
           label: label || `${document_type}`,
-          uploaded_at: getPKTDate(new Date())
+          uploaded_at: new Date()
         }
       });
     }
@@ -2689,7 +2688,7 @@ const replaceLocationPhoto = async (req, res) => {
       where: { id: parseInt(photo_id) },
       data: {
         file_url: req.file.url,
-        uploaded_at: getPKTDate(new Date())
+        uploaded_at: new Date()
       },
       include: {
         verification_location: {
@@ -2711,7 +2710,7 @@ const replaceLocationPhoto = async (req, res) => {
         new_value: updated.file_url,
         edited_by_id: req.user.id,
         edited_by_name: req.user.full_name,
-        edited_at: getPKTDate(new Date())
+        edited_at: new Date()
       }
     });
 

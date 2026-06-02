@@ -7,7 +7,6 @@ const { sendOTP, sendDeliveryConfirmation, sendInstallmentLedger } = require('..
 const { notifyUser, notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const admin = require('firebase-admin');
-const { getPKTDate, formatPKTDate } = require("../utils/dateUtils");
 const { generateConsumerNumber, generateSmartPayConsumerNumber } = require('../utils/consumerNumberUtils');
 const { createOfficerTransaction } = require('../utils/officerTransactionUtils');
 
@@ -139,8 +138,8 @@ const submitDelivery = async (req, res) => {
         order_id: parseInt(order_id),
         delivery_agent_id: req.user.id,
         status: 'completed',
-        start_time: getPKTDate(new Date()),
-        end_time: getPKTDate(new Date()),
+        start_time: new Date(),
+        end_time: new Date(),
         verified: true,
         product_imei: product_imei || null,
         selected_plan: selected_plan || null,
@@ -199,7 +198,7 @@ const submitDelivery = async (req, res) => {
         upload_type: 'face_photo',
         file_url: file.url,
         tag: faceTags[index] || null,
-        uploaded_at: getPKTDate(new Date())
+        uploaded_at: new Date()
       });
     });
 
@@ -210,7 +209,7 @@ const submitDelivery = async (req, res) => {
         upload_type: 'location_photo',
         file_url: file.url,
         tag: locationTags[index] || null,
-        uploaded_at: getPKTDate(new Date())
+        uploaded_at: new Date()
       });
     });
 
@@ -221,7 +220,7 @@ const submitDelivery = async (req, res) => {
         upload_type: 'house_photo',
         file_url: file.url,
         tag: houseTags[index] || null,
-        uploaded_at: getPKTDate(new Date())
+        uploaded_at: new Date()
       });
     });
 
@@ -232,7 +231,7 @@ const submitDelivery = async (req, res) => {
         upload_type: 'location_link',
         link: link,
         tag: linkTags[index] || null,
-        uploaded_at: getPKTDate(new Date())
+        uploaded_at: new Date()
       });
     });
 
@@ -286,7 +285,7 @@ const submitDelivery = async (req, res) => {
           color_variant: colorVariant || null,
           stock_transfer_id: stockTransferId,
           payment_method: 'Cash',
-          created_at: getPKTDate(new Date())
+          created_at: new Date()
         }
       });
 
@@ -325,10 +324,10 @@ const submitDelivery = async (req, res) => {
         ledgerRows.push({
           month: 0,
           label: 'Advance Payment',
-          due_date: deliveryDate.toISOString(),
+          due_date: deliveryDate,
           amount: parseFloat(advanceAmount || 0),
           status: 'paid',
-          paid_at: deliveryDate.toISOString(),
+          paid_at: deliveryDate,
           payment_method: 'Cash',
           feedback: 'Collected at Delivery'
         });
@@ -339,7 +338,7 @@ const submitDelivery = async (req, res) => {
             ledgerRows.push({
               month: i + 1,
               label: `Month ${i + 1}`,
-              due_date: row.date ? new Date(row.date).toISOString() : addMonths(deliveryDate, i + 1).toISOString(),
+              due_date: row.date ? new Date(row.date) : addMonths(deliveryDate, i + 1),
               amount: parseFloat(row.amount) || parseFloat(monthlyAmt),
               status: 'pending',
               paid_at: null,
@@ -351,7 +350,7 @@ const submitDelivery = async (req, res) => {
             ledgerRows.push({
               month: i + 1,
               label: `Month ${i + 1}`,
-              due_date: addMonths(deliveryDate, i + 1).toISOString(),
+              due_date: addMonths(deliveryDate, i + 1),
               amount: parseFloat(monthlyAmt),
               status: 'pending',
               paid_at: null,
@@ -394,7 +393,7 @@ const submitDelivery = async (req, res) => {
         // Save the consumer_numbers record 
         // using the new table as specified by 1Bill TPS spec
         let firstMonthDue = 0;
-        let dueDate = getPKTDate();
+        let dueDate = new Date();
         let billingMonthStr = "0000";
 
         if (Array.isArray(ledgerRows) && ledgerRows.length > 1) {
@@ -695,7 +694,7 @@ const getCashInHand = async (req, res) => {
         if (date_from) where.created_at.gte = new Date(date_from);
         if (date_to) where.created_at.lte = new Date(date_to);
       } else {
-        const today = getPKTDate(new Date());
+        const today = new Date();
         today.setHours(0, 0, 0, 0);
         where.created_at = { gte: today };
       }
@@ -1052,7 +1051,7 @@ const verifyDeliveryOtp = async (req, res) => {
             data: {
               status: 'delivered',
               is_delivered: true,
-              delivered_at: getPKTDate(new Date())
+              delivered_at: new Date()
             }
           });
 
@@ -1061,12 +1060,12 @@ const verifyDeliveryOtp = async (req, res) => {
             where: { order_id: order.id },
             update: {
               ledger_rows: parsedLedger,
-              updated_at: getPKTDate(new Date())
+              updated_at: new Date()
             },
             create: {
               order_id: order.id,
               ledger_rows: parsedLedger,
-              created_at: getPKTDate(new Date())
+              created_at: new Date()
             }
           });
 
@@ -1080,7 +1079,7 @@ const verifyDeliveryOtp = async (req, res) => {
               where: { id: existingDelivery.id },
               data: {
                 status: 'completed',
-                end_time: getPKTDate(new Date()),
+                end_time: new Date(),
                 verified: true
               }
             });
@@ -1091,8 +1090,8 @@ const verifyDeliveryOtp = async (req, res) => {
                 order_id: order.id,
                 delivery_agent_id: req.user.id,
                 status: 'completed',
-                start_time: getPKTDate(new Date()),
-                end_time: getPKTDate(new Date()),
+                start_time: new Date(),
+                end_time: new Date(),
                 verified: true,
                 self_pickup: false
               }
@@ -1150,7 +1149,7 @@ const returnProduct = async (req, res) => {
       data: {
         status: 'returned',
         cancelled_reason: reason,
-        cancelled_at: getPKTDate(new Date())
+        cancelled_at: new Date()
       }
     });
 
@@ -1435,7 +1434,7 @@ const initiateReturnExchange = async (req, res) => {
 
     // 48-hour verification (Extended from 24h)
     const delivery_time = delivery.end_time || delivery.updated_at;
-    const now = getPKTDate(new Date());
+    const now = new Date();
     const hoursDifference = (now.getTime() - delivery_time.getTime()) / (1000 * 60 * 60);
 
     if (hoursDifference > 48) {
@@ -1690,8 +1689,8 @@ const submitSelfPickupDelivery = async (req, res) => {
           order_id: parseInt(order_id),
           delivery_agent_id: req.user.id, // The branch user who processed the self-pickup
           status: 'completed',
-          start_time: getPKTDate(new Date()),
-          end_time: getPKTDate(new Date()),
+          start_time: new Date(),
+          end_time: new Date(),
           verified: true,
           product_imei: product_imei || null,
           selected_plan: selected_plan || null,
@@ -1707,7 +1706,7 @@ const submitSelfPickupDelivery = async (req, res) => {
             delivery_id: delivery.id,
             upload_type: 'face_photo',
             file_url: file.url || file.path, // handle both cases
-            uploaded_at: getPKTDate(new Date())
+            uploaded_at: new Date()
           }))
         });
       }
@@ -1737,7 +1736,7 @@ const submitSelfPickupDelivery = async (req, res) => {
             color_variant: colorVariant || null,
             payment_method: 'Cash',
             cash_type: 'Down payment (Self Pickup)',
-            created_at: getPKTDate(new Date())
+            created_at: new Date()
           }
         });
 
@@ -1777,10 +1776,10 @@ const submitSelfPickupDelivery = async (req, res) => {
         ledgerRows.push({
           month: 0,
           label: 'Advance Payment',
-          due_date: deliveryDate.toISOString(),
+          due_date: deliveryDate,
           amount: parseFloat(advanceAmount || 0),
           status: 'paid',
-          paid_at: deliveryDate.toISOString(),
+          paid_at: deliveryDate,
           payment_method: 'Cash',
           feedback: 'Self Pickup at Branch'
         });
@@ -1791,7 +1790,7 @@ const submitSelfPickupDelivery = async (req, res) => {
             ledgerRows.push({
               month: i + 1,
               label: `Month ${i + 1}`,
-              due_date: row.date ? new Date(row.date).toISOString() : addMonths(deliveryDate, i + 1).toISOString(),
+              due_date: row.date ? new Date(row.date) : addMonths(deliveryDate, i + 1),
               amount: parseFloat(row.amount) || parseFloat(monthlyAmt),
               status: 'pending',
               paid_at: null,
@@ -1803,7 +1802,7 @@ const submitSelfPickupDelivery = async (req, res) => {
             ledgerRows.push({
               month: i + 1,
               label: `Month ${i + 1}`,
-              due_date: addMonths(deliveryDate, i + 1).toISOString(),
+              due_date: addMonths(deliveryDate, i + 1),
               amount: parseFloat(monthlyAmt),
               status: 'pending',
               paid_at: null,
@@ -1837,7 +1836,7 @@ const submitSelfPickupDelivery = async (req, res) => {
         const smartPayConsumerNo = await generateSmartPayConsumerNumber(product_imei, mobile);
 
         let firstMonthDue = 0;
-        let dueDate = getPKTDate();
+        let dueDate = new Date();
         let billingMonthStr = "0000";
 
         if (Array.isArray(ledgerRows) && ledgerRows.length > 1) {
@@ -1974,7 +1973,7 @@ const replaceDeliveryUpload = async (req, res) => {
       where: { id: parseInt(upload_id) },
       data: {
         file_url: req.file.url,
-        uploaded_at: getPKTDate(new Date())
+        uploaded_at: new Date()
       },
       include: {
         delivery: {
@@ -2001,7 +2000,7 @@ const replaceDeliveryUpload = async (req, res) => {
           new_value: updated.file_url,
           edited_by_id: req.user.id,
           edited_by_name: req.user.full_name,
-          edited_at: getPKTDate(new Date())
+          edited_at: new Date()
         }
       });
     }

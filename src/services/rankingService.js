@@ -1,6 +1,5 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
-const { getPKTDate } = require('../utils/dateUtils');
 
 /**
  * Identifies or creates a unique customer based on CNIC or Mobile Number.
@@ -82,7 +81,7 @@ async function checkRepeatStatus(customerId, currentOrderId) {
  * Recalculates ranking for a CSR for a specific period.
  */
 async function updateCsrRanking(csrId, periodType = 'month') {
-    const now = getPKTDate();
+    const now = new Date();
     let start, end;
 
     if (periodType === 'month') {
@@ -205,7 +204,7 @@ async function updateCsrRanking(csrId, periodType = 'month') {
             total_sales: totalSales,
             score: score,
             trend: trend,
-            updated_at: getPKTDate()
+            updated_at: new Date()
         },
         create: {
             csr_id: csrId,
@@ -231,7 +230,7 @@ async function updateCsrRanking(csrId, periodType = 'month') {
  * Calculates working days left in the current month, skipping Sundays.
  */
 function getWorkingDaysLeftInMonth() {
-    const now = getPKTDate();
+    const now = new Date();
     const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0);
 
     let workingDays = 0;

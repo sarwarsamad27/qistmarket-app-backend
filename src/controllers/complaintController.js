@@ -12,7 +12,7 @@ const createComplaint = async (req, res) => {
       });
     }
 
-    const complaintId = `CMP-${new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)}-${Math.floor(1000 + Math.random() * 9000)}`;
+    const complaintId = `CMP-${new Date().replace(/[^0-9]/g, '').slice(0, 14)}-${Math.floor(1000 + Math.random() * 9000)}`;
 
     // Build media URLs from uploaded files
     let mediaUrls = [];

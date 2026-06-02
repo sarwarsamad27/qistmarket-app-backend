@@ -192,7 +192,7 @@ const updateOfficerProfile = async (req, res) => {
 
     const historyEntry = hasChange
       ? {
-          updatedAt: new Date().toISOString(),
+          updatedAt: new Date(),
           previous: {
             bike_km_range: currentUser.bike_km_range,
             working_hours_start: currentUser.working_hours_start,

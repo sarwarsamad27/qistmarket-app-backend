@@ -34,7 +34,7 @@ const notifyAdmins = async (title, message, type, relatedId = null, io = null) =
                 type,
                 relatedId,
                 isRead: false,
-                createdAt: new Date().toISOString(),
+                createdAt: new Date(),
             });
         }
     } catch (err) {
@@ -109,7 +109,7 @@ const notifyOutlet = async (outletId, title, message, type, relatedId = null, io
                 type,
                 relatedId,
                 isRead: false,
-                createdAt: new Date().toISOString(),
+                createdAt: new Date(),
             });
         }
     } catch (err) {

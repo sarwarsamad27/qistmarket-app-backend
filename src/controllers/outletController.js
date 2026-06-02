@@ -7,7 +7,6 @@ const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { sendOTP, sendInstallmentPaymentReceipt, sendPartialInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
-const { getPKTDate } = require('../utils/dateUtils');
 
 
 const createOutlet = async (req, res) => {
@@ -146,7 +145,7 @@ const getDashboardStats = async (req, res) => {
         const { filter = 'today', startDate, endDate } = req.query;
 
         // Date range calculation using PKT (matching CSR analytics)
-        const now = getPKTDate();
+        const now = new Date();
         let start, end;
 
         if (filter === 'today') {

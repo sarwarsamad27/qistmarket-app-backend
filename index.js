@@ -206,7 +206,7 @@ io.on('connection', (socket) => {
         io.to('admins').emit('officer_status_update', {
           officerId,
           is_online: true,
-          timestamp: new Date().toISOString(),
+          timestamp: new Date(),
         });
 
         const today = new Date().toISOString().split('T')[0];
@@ -305,7 +305,7 @@ io.on('connection', (socket) => {
         latitude,
         longitude,
         accuracy,
-        timestamp: new Date().toISOString(),
+        timestamp: new Date(),
       });
     } catch (err) {
       console.error('Location update failed:', err.message);
@@ -392,7 +392,7 @@ io.on('connection', (socket) => {
       io.to('admins').emit('officer_status_update', {
         officerId,
         is_online: false,
-        timestamp: new Date().toISOString(),
+        timestamp: new Date(),
       });
 
       console.log(`Officer ${officerId} → OFFLINE`);
@@ -419,7 +419,7 @@ app.get('/', (req, res) => {
   res.json({
     status: 'ok',
     socketio: 'enabled',
-    timestamp: new Date().toISOString(),
+    timestamp: new Date(),
   });
 });
 

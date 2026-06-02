@@ -197,8 +197,8 @@ const getCustomers = async (req, res) => {
         token_number: order.token_number,
         status: order.status,
         is_delivered: true,
-        delivery_date: deliveryDate ? deliveryDate.toISOString() : null,
-        created_at: order.created_at.toISOString(),
+        delivery_date: deliveryDate ? deliveryDate : null,
+        created_at: order.created_at,
         verification_status: order.verification?.status || null,
 
         product_details: {

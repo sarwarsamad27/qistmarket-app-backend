@@ -5,7 +5,7 @@ async function check() {
     const start = new Date(); 
     start.setHours(0,0,0,0);
     
-    console.log('Searching for orders updated after:', start.toISOString());
+    console.log('Searching for orders updated after:', start);
 
     const orders = await prisma.order.findMany({
         where: { 
