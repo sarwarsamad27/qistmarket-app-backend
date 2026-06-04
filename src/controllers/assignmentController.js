@@ -1,5 +1,8 @@
 const prisma = require('../../lib/prisma');
 
+// Helper for current timestamp
+const now = () => new Date();
+
 const getOfficerAssignments = async (req, res) => {
     const { role } = req.query;
     try {
@@ -50,13 +53,15 @@ const updateOfficerAssignments = async (req, res) => {
             where: { user_id: parseInt(officerId) }
         });
 
-        // Create new assignments
+        // Create new assignments with explicit timestamps
         if (assignments && assignments.length > 0) {
             await prisma.officerAreaAssignment.createMany({
                 data: assignments.map(a => ({
                     user_id: parseInt(officerId),
                     zone: a.zone,
                     area: a.area,
+                    createdAt: now(),   // ✅ explicit createdAt
+                    updatedAt: now()    // ✅ explicit updatedAt
                 }))
             });
         }

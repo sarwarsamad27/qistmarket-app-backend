@@ -6,6 +6,9 @@ const { checkBlacklistStatus } = require('../utils/blacklistUtils');
 const { getNormalizedLedger } = require('../utils/ledgerUtils');
 const { getOrCreateCustomer, updateCsrRanking } = require('../services/rankingService');
 
+// Helper for current timestamp
+const now = () => new Date();
+
 // Start Verification
 const startVerification = async (req, res) => {
   const { order_id } = req.body;
@@ -38,7 +41,9 @@ const startVerification = async (req, res) => {
         order_id: parseInt(order_id),
         verification_officer_id: req.user.id,
         status: 'in_progress',
-        start_time: new Date()
+        start_time: now(),
+        created_at: now(),      // ✅ explicit
+        updated_at: now()       // ✅ explicit
       },
       include: {
         order: { select: { order_ref: true } },
@@ -50,12 +55,11 @@ const startVerification = async (req, res) => {
       where: { id: parseInt(order_id) },
       data: {
         status: 'in_progress',
-        updated_at: new Date(),
+        updated_at: now()
       }
     });
 
     await logOrderStatusChange(parseInt(order_id), order.status, 'in_progress', req.user);
-
 
     // Create empty purchaser
     const purchaser = await prisma.purchaserVerification.create({
@@ -172,7 +176,6 @@ const startVerification = async (req, res) => {
 
     // Emit real-time update for officer's current verification assignment
     if (io) {
-      // Find the officer's current verification (same as in officerController)
       const currentVerification = {
         id: verification.id,
         status: verification.status,
@@ -206,7 +209,6 @@ const startVerification = async (req, res) => {
   }
 };
 
-// Save Purchaser Verification (updated with nearest_location)
 // Save Purchaser Verification - WITH ORDER DATA SWAP LOGIC
 const savePurchaserVerification = async (req, res) => {
   const { verification_id } = req.params;
@@ -288,7 +290,7 @@ const savePurchaserVerification = async (req, res) => {
           street: ordersData.street,
           zone: ordersData.zone,
           alternate_contact: ordersData.alternate_contact,
-          moved_at: new Date()
+          moved_at: now()
         }
       });
     } else {
@@ -306,7 +308,7 @@ const savePurchaserVerification = async (req, res) => {
           street: ordersData.street,
           zone: ordersData.zone,
           alternate_contact: ordersData.alternate_contact,
-          moved_at: new Date()
+          moved_at: now()
         }
       });
     }
@@ -328,7 +330,7 @@ const savePurchaserVerification = async (req, res) => {
         street: present_street,
         zone: present_zone,
         alternate_contact: telephone_number,
-        updated_at: new Date()
+        updated_at: now()
       }
     });
 
@@ -395,10 +397,6 @@ const savePurchaserVerification = async (req, res) => {
         ...data
       }
     });
-
-    // ============================================================
-    // 🔥 OPTIONAL: Response mein batayein ke dummy data shift ho gaya
-    // ============================================================
 
     return res.status(200).json({
       success: true,
@@ -660,7 +658,7 @@ const saveLocation = async (req, res) => {
         longitude: parseFloat(longitude),
         accuracy: accuracy ? parseFloat(accuracy) : null,
         label,
-        timestamp: new Date()
+        timestamp: now()
       }
     });
 
@@ -714,7 +712,7 @@ const saveVerificationLocation = async (req, res) => {
         label,
         person_type,
         person_id: person_id ? parseInt(person_id) : null,
-        created_at: new Date()
+        created_at: now()
       }
     });
 
@@ -727,7 +725,7 @@ const saveVerificationLocation = async (req, res) => {
         data: {
           verification_location_id: location.id,
           file_url: file.url,
-          uploaded_at: new Date()
+          uploaded_at: now()
         }
       })
     );
@@ -860,7 +858,7 @@ const uploadPurchaserDocument = async (req, res) => {
         person_id: purchaser.id,
         file_url: req.file.url,
         label: `${document_type} - Purchaser`,
-        uploaded_at: new Date()
+        uploaded_at: now()
       }
     });
 
@@ -918,7 +916,7 @@ const uploadGrantorDocument = async (req, res) => {
         person_id: grantor.id,
         file_url: req.file.url,
         label: `${document_type} - Grantor ${grantor_number}`,
-        uploaded_at: new Date()
+        uploaded_at: now()
       }
     });
 
@@ -984,7 +982,7 @@ const uploadPhoto = async (req, res) => {
         person_id: person_id ? parseInt(person_id) : null,
         file_url: req.file.url,
         label: label || `Photo - ${person_type}`,
-        uploaded_at: new Date()
+        uploaded_at: now()
       }
     });
 
@@ -1035,7 +1033,7 @@ const uploadSignature = async (req, res) => {
         person_id: person_id ? parseInt(person_id) : null,
         file_url: req.file.url,
         label: `Signature - ${person_type}`,
-        uploaded_at: new Date()
+        uploaded_at: now()
       }
     });
 
@@ -1162,9 +1160,10 @@ const completeVerification = async (req, res) => {
       where: { id: parseInt(verification_id) },
       data: {
         status: 'completed',
-        end_time: new Date(),
+        end_time: now(),
         home_location_required: home_location_required === true || home_location_required === 'true',
-        verification_feedback: feedback || null
+        verification_feedback: feedback || null,
+        updated_at: now()   // ✅ explicit
       },
       include: {
         order: { select: { order_ref: true, id: true } },
@@ -1182,7 +1181,7 @@ const completeVerification = async (req, res) => {
       where: { id: updatedVerification.order_id },
       data: {
         status: 'completed',
-        updated_at: new Date(),
+        updated_at: now(),
         outlet_id: updatedVerification.verification_officer?.outlet_id || null // Route back to the officer's outlet
       }
     });
@@ -1364,7 +1363,6 @@ const getVerificationByOrderId = async (req, res) => {
   }
 };
 
-
 // Submit Verification Review
 const submitVerificationReview = async (req, res) => {
   const { verification_id } = req.params;
@@ -1382,7 +1380,6 @@ const submitVerificationReview = async (req, res) => {
     if (!verification) {
       return res.status(404).json({ success: false, error: 'Verification not found' });
     }
-
 
     if (verification.reviews.length >= 3) {
       return res.status(400).json({
@@ -1419,7 +1416,7 @@ const submitVerificationReview = async (req, res) => {
         reviewer_id: req.user.id,
         approved,
         remarks: finalRemarks,
-        created_at: new Date()
+        created_at: now()
       }
     });
 
@@ -1456,7 +1453,7 @@ const submitVerificationReview = async (req, res) => {
           where: { id: verification.order.id },
           data: {
             status: orderStatusUpdate,
-            updated_at: new Date(),
+            updated_at: now()
           }
         })
       );
@@ -1896,7 +1893,7 @@ const recordEditHistory = async (
         new_value: new_value ? String(new_value) : null,
         edited_by_id: parseInt(edited_by_id),
         edited_by_name,
-        edited_at: new Date()
+        edited_at: now()
       }
     });
 
@@ -2117,7 +2114,8 @@ const sendToVOForLocation = async (req, res) => {
       where: { id: verification.id },
       data: {
         verification_officer_id: parseInt(officer_id),
-        status: 'location_capture_pending'
+        status: 'location_capture_pending',
+        updated_at: now()   // ✅ explicit
       }
     });
 
@@ -2157,7 +2155,8 @@ const sendToDOForLocation = async (req, res) => {
       where: { id: verification.id },
       data: {
         verification_officer_id: parseInt(officer_id),
-        status: 'location_capture_pending'
+        status: 'location_capture_pending',
+        updated_at: now()   // ✅ explicit
       }
     });
 
@@ -2213,7 +2212,7 @@ const updateLocationVerified = async (req, res) => {
         label,
         person_type,
         person_id: person_id ? parseInt(person_id) : null,
-        created_at: new Date()
+        created_at: now()
       }
     });
 
@@ -2226,7 +2225,7 @@ const updateLocationVerified = async (req, res) => {
         data: {
           verification_location_id: location.id,
           file_url: file.url,
-          uploaded_at: new Date()
+          uploaded_at: now()
         }
       })
     );
@@ -2240,6 +2239,7 @@ const updateLocationVerified = async (req, res) => {
         home_location_verified: true,
         home_location_required: false,
         status: 'location_captured',
+        updated_at: now()   // ✅ explicit
       }
     });
 
@@ -2436,7 +2436,6 @@ const getDeliveredProductDetails = async (req, res) => {
       success: true,
       data: deliveredProductDetails
     });
-
   } catch (error) {
     console.error('Get delivered product details error:', error);
     return res.status(500).json({
@@ -2537,7 +2536,6 @@ const getDeliveredProductsList = async (req, res) => {
         }
       }
     });
-
   } catch (error) {
     console.error('Get delivered products list error:', error);
     return res.status(500).json({
@@ -2600,7 +2598,7 @@ const updateVerificationMedia = async (req, res) => {
           where: { id: existingDoc.id },
           data: {
             file_url: req.file.url,
-            uploaded_at: new Date()
+            uploaded_at: now()
           }
         });
       }
@@ -2613,7 +2611,7 @@ const updateVerificationMedia = async (req, res) => {
           person_id: entity_id,
           file_url: req.file.url,
           label: label || `${document_type}`,
-          uploaded_at: new Date()
+          uploaded_at: now()
         }
       });
     }
@@ -2658,14 +2656,11 @@ const updateVerificationMedia = async (req, res) => {
       message: 'Media updated and replaced successfully',
       data: { document }
     });
-
   } catch (error) {
     console.error('Update verification media error:', error);
     return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 };
-
-
 
 // Replace a verification location photo (Super Admin only)
 const replaceLocationPhoto = async (req, res) => {
@@ -2688,7 +2683,7 @@ const replaceLocationPhoto = async (req, res) => {
       where: { id: parseInt(photo_id) },
       data: {
         file_url: req.file.url,
-        uploaded_at: new Date()
+        uploaded_at: now()
       },
       include: {
         verification_location: {
@@ -2710,7 +2705,7 @@ const replaceLocationPhoto = async (req, res) => {
         new_value: updated.file_url,
         edited_by_id: req.user.id,
         edited_by_name: req.user.full_name,
-        edited_at: new Date()
+        edited_at: now()
       }
     });
 

@@ -1,5 +1,8 @@
 const prisma = require('../../lib/prisma');
 
+// Helper for current timestamp
+const now = () => new Date();
+
 const getOutletSettings = async (outletId) => {
     try {
         const outlet = await prisma.outlet.findUnique({
@@ -39,7 +42,8 @@ const saveOutletSettings = async (outletId, newSettings) => {
         await prisma.outlet.update({
             where: { id: parseInt(outletId) },
             data: {
-                auto_assignment_config: updatedSettings
+                auto_assignment_config: updatedSettings,
+                updated_at: now()   // ✅ explicit updated_at
             }
         });
         return true;

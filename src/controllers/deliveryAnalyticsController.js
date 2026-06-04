@@ -1,8 +1,3 @@
-// Delivery Officer Analytics & Reporting API
-// Route: GET /api/delivery-boy/analytics
-// Query params: range=Day|Week|Month|Custom&start=YYYY-MM-DD&end=YYYY-MM-DD
-// Returns: sales, KM, working hours, inventory reports for the logged-in delivery officer
-
 const prisma = require('../../lib/prisma');
 
 function getDateRange(range, start, end) {

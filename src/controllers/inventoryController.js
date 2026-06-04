@@ -5,15 +5,26 @@ const { logAction } = require('../utils/auditLogger');
 const axios = require('axios');
 const admin = require('firebase-admin');
 
+// ─── Firebase Init ────────────────────────────────────────────────
 if (!admin.apps.length) {
-    admin.initializeApp({
-        credential: admin.credential.cert({
-            projectId: process.env.FIREBASE_PROJECT_ID,
-            clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-            privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
-        }),
-    });
+  const _realDate = global._OriginalDate; // prisma.js ne set kiya hua hai
+  global.Date = _realDate;               // Firebase ke liye original date
+
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+    }),
+  });
+
+  global.Date = global._PKTDate;         // PKT date wapas
 }
+// ─────────────────────────────────────────────────────────────────
+
+// Helper for current timestamp
+const now = () => new Date();
+
 
 // ─── Stock Transfer OTP Notification Helper ──────────────────────────────────
 
@@ -28,6 +39,7 @@ async function sendStockTransferOTPNotification(user, otp, recipientType, io = n
 
     if (!user?.fcm_token) return;
 
+    global.Date = global._OriginalDate;
     try {
         await admin.messaging().send({
             token: user.fcm_token,
@@ -40,7 +52,10 @@ async function sendStockTransferOTPNotification(user, otp, recipientType, io = n
         });
     } catch (fcmError) {
         console.error('FCM send failed for transfer OTP:', fcmError);
-    }
+    } finally {
+    // ─── PKT date wapas lagao ───────────────────────
+    global.Date = global._PKTDate;
+  }
 }
 
 
@@ -248,7 +263,9 @@ const addInventory = async (req, res) => {
                     purchase_price: purchasePriceNum,
                     installment_price: 0,
                     installment_plans: instPlans,
-                    status: status || 'In Stock'
+                    status: status || 'In Stock',
+                    created_at: now(),   // ✅ explicit created_at
+                    updated_at: now()    // ✅ explicit updated_at
                 }
             });
             createdItems.push(created);
@@ -323,13 +340,15 @@ const initiateStockTransfer = async (req, res) => {
         const otp = Math.floor(10000 + Math.random() * 90000).toString();
 
         const result = await prisma.$transaction(async (tx) => {
-            // 1. Create OTP
+            // 1. Create OTP with explicit timestamps
             await tx.otp.create({
                 data: {
                     phone: recipientIdentifier,
                     otp,
                     purpose: 'stock_transfer',
-                    expiresAt: new Date(Date.now() + 15 * 60000)
+                    expiresAt: new Date(Date.now() + 15 * 60000),
+                    createdAt: now(),   // ✅ explicit createdAt
+                    updatedAt: now()    // ✅ explicit updatedAt
                 }
             });
 
@@ -363,22 +382,30 @@ const initiateStockTransfer = async (req, res) => {
                             status: 'Pending Transfer',
                             color_variant: item.color_variant,
                             quantity: requestedQty,
-                            installment_plans: item.installment_plans
+                            installment_plans: item.installment_plans,
+                            created_at: now(),   // ✅ explicit
+                            updated_at: now()    // ✅ explicit
                         }
                     });
 
-                    // Update original row (reduce quantity)
+                    // Update original row (reduce quantity) with updated_at
                     await tx.outletInventory.update({
                         where: { id: item.id },
-                        data: { quantity: item.quantity - requestedQty }
+                        data: { 
+                            quantity: item.quantity - requestedQty,
+                            updated_at: now()   // ✅ explicit updated_at
+                        }
                     });
 
                     finalInventoryId = newPendingRow.id;
                 } else {
-                    // FULL ROW: Just mark as Pending Transfer
+                    // FULL ROW: Just mark as Pending Transfer with updated_at
                     await tx.outletInventory.update({
                         where: { id: item.id },
-                        data: { status: 'Pending Transfer' }
+                        data: { 
+                            status: 'Pending Transfer',
+                            updated_at: now()   // ✅ explicit updated_at
+                        }
                     });
                 }
 
@@ -389,7 +416,9 @@ const initiateStockTransfer = async (req, res) => {
                     to_id: targetId,
                     inventory_id: finalInventoryId,
                     quantity_transferred: requestedQty,
-                    status: 'pending'
+                    status: 'pending',
+                    created_at: now(),   // ✅ explicit created_at
+                    updated_at: now()    // ✅ explicit updated_at
                 });
             }
 
@@ -403,13 +432,14 @@ const initiateStockTransfer = async (req, res) => {
         const io = req.app.get('io');
         const message = `Stock Transfer OTP: ${otp}. From Outlet ${outlet_id} to ${to_type} ${recipientName}`;
 
-        // Log OTP
+        // Log OTP with explicit created_at
         await prisma.otpLog.create({
             data: {
                 user_id: to_type === 'Delivery Officer' ? parseInt(targetId) : req.user.id,
                 action: "stock_transfer_otp",
                 message,
-                otp
+                otp,
+                created_at: now()   // ✅ explicit created_at
             }
         });
 
@@ -440,7 +470,7 @@ const initiateStockTransfer = async (req, res) => {
                     action: "stock_transfer_otp",
                     message,
                     otp,
-                    created_at: new Date()
+                    created_at: now()
                 });
             }
         }
@@ -521,13 +551,21 @@ const verifyStockTransfer = async (req, res) => {
                         // Full row moves to target outlet
                         await tx.outletInventory.update({
                             where: { id: item.id },
-                            data: { outlet_id: targetId, status: 'In Stock' }
+                            data: { 
+                                outlet_id: targetId, 
+                                status: 'In Stock',
+                                updated_at: now()   // ✅ explicit updated_at
+                            }
                         });
                     } else {
                         // Split row: Original stays at origin with reduced Qty, new row created at target
                         await tx.outletInventory.update({
                             where: { id: item.id },
-                            data: { quantity: item.quantity - actualTransferQty, status: 'In Stock' }
+                            data: { 
+                                quantity: item.quantity - actualTransferQty, 
+                                status: 'In Stock',
+                                updated_at: now()   // ✅ explicit updated_at
+                            }
                         });
 
                         const existingAtTarget = await tx.outletInventory.findFirst({
@@ -537,7 +575,10 @@ const verifyStockTransfer = async (req, res) => {
                         if (existingAtTarget) {
                             await tx.outletInventory.update({
                                 where: { id: existingAtTarget.id },
-                                data: { quantity: existingAtTarget.quantity + actualTransferQty }
+                                data: { 
+                                    quantity: existingAtTarget.quantity + actualTransferQty,
+                                    updated_at: now()   // ✅ explicit updated_at
+                                }
                             });
                         } else {
                             await tx.outletInventory.create({
@@ -553,7 +594,9 @@ const verifyStockTransfer = async (req, res) => {
                                     installment_plans: item.installment_plans || null,
                                     sale_price: item.sale_price || null,
                                     api_product_name: item.api_product_name || null,
-                                    status: 'In Stock'
+                                    status: 'In Stock',
+                                    created_at: now(),   // ✅ explicit created_at
+                                    updated_at: now()    // ✅ explicit updated_at
                                 }
                             });
                         }
@@ -564,19 +607,26 @@ const verifyStockTransfer = async (req, res) => {
                     if (isFullTransfer) {
                         await tx.outletInventory.update({
                             where: { id: item.id },
-                            data: { status: 'Out Of Stock' }
+                            data: { 
+                                status: 'Out Of Stock',
+                                updated_at: now()   // ✅ explicit updated_at
+                            }
                         });
                     } else {
                         await tx.outletInventory.update({
                             where: { id: item.id },
-                            data: { quantity: item.quantity - actualTransferQty, status: 'In Stock' }
+                            data: { 
+                                quantity: item.quantity - actualTransferQty, 
+                                status: 'In Stock',
+                                updated_at: now()   // ✅ explicit updated_at
+                            }
                         });
                         // We might need to create a record of what the DO is carrying, but currently DO inventory isn't explicitly tracked in rows.
                         // It's tracked via StockTransfer and Order status.
                     }
                 }
 
-                // Update StockTransfer record status to 'delivered'
+                // Update StockTransfer record status to 'transferred'
                 await tx.stockTransfer.updateMany({
                     where: {
                         inventory_id: item.id,
@@ -584,16 +634,22 @@ const verifyStockTransfer = async (req, res) => {
                         to_id: targetId,
                         status: 'pending'
                     },
-                    data: { status: 'transferred' }
+                    data: { 
+                        status: 'transferred',
+                        updated_at: now()   // ✅ explicit updated_at
+                    }
                 });
 
                 transferData.push({ id: item.id, qty: actualTransferQty });
             }
 
-            // Mark OTP as used
+            // Mark OTP as used with updatedAt
             await tx.otp.update({
                 where: { id: otpRecord.id },
-                data: { isUsed: true }
+                data: { 
+                    isUsed: true,
+                    updatedAt: now()   // ✅ explicit updatedAt
+                }
             });
 
             return transferData;
@@ -627,6 +683,7 @@ const verifyStockTransfer = async (req, res) => {
 
 
 const getTransferHistory = async (req, res) => {
+    // ... unchanged (read-only)
     const { outlet_id } = req.user;
     const { page = 1, limit = 20, search = "", to_type, startDate, endDate, direction = 'sent', status } = req.query;
     const skip = (parseInt(page) - 1) * parseInt(limit);
@@ -757,6 +814,7 @@ const updateInventoryItem = async (req, res) => {
                 quantity: data.quantity !== undefined ? parseInt(data.quantity) : undefined,
                 purchase_price: data.purchase_price !== undefined ? parseFloat(data.purchase_price) : undefined,
                 status: data.status,
+                updated_at: now()   // ✅ explicit updated_at
             }
         });
 
@@ -803,6 +861,9 @@ const bulkUpdateInventory = async (req, res) => {
         if (data.color_variant) updateData.color_variant = data.color_variant;
         if (data.quantity !== undefined) updateData.quantity = parseInt(data.quantity);
         if (data.purchase_price !== undefined) updateData.purchase_price = parseFloat(data.purchase_price);
+        
+        // Add updated_at for bulk update (same timestamp for all)
+        updateData.updated_at = now();
 
         const updated = await prisma.outletInventory.updateMany({
             where: { id: { in: ids.map(id => parseInt(id)) }, outlet_id },
@@ -857,22 +918,25 @@ const cancelStockTransfer = async (req, res) => {
         const inventoryIds = transfers.map(t => t.inventory_id);
 
         await prisma.$transaction(async (tx) => {
-            // 1. Update StockTransfer status
+            // 1. Update StockTransfer status with updated_at
             await tx.stockTransfer.updateMany({
                 where: { id: { in: transfers.map(t => t.id) } },
-                data: { status: 'cancelled' }
+                data: { 
+                    status: 'cancelled',
+                    updated_at: now()   // ✅ explicit updated_at
+                }
             });
 
             // 2. Revert inventory status
-            // Note: We process each inventory item to ensure status is reverted
             for (const t of transfers) {
                 const inv = await tx.outletInventory.findUnique({ where: { id: t.inventory_id } });
                 if (inv && inv.status === 'Pending Transfer') {
-                    // Check if there's an existing 'In Stock' row for the same item to merge back into
-                    // To keep it simple and safe, we just set the status back to 'In Stock'
                     await tx.outletInventory.update({
                         where: { id: inv.id },
-                        data: { status: 'In Stock' }
+                        data: { 
+                            status: 'In Stock',
+                            updated_at: now()   // ✅ explicit updated_at
+                        }
                     });
                 }
             }
@@ -925,7 +989,9 @@ const resendStockTransferOTP = async (req, res) => {
                 phone: recipientIdentifier,
                 otp,
                 purpose: 'stock_transfer',
-                expiresAt: new Date(Date.now() + 15 * 60000)
+                expiresAt: new Date(Date.now() + 15 * 60000),
+                createdAt: now(),   // ✅ explicit createdAt
+                updatedAt: now()    // ✅ explicit updatedAt
             }
         });
 
@@ -935,7 +1001,8 @@ const resendStockTransferOTP = async (req, res) => {
                 user_id: to_type === 'Delivery Officer' ? parseInt(targetId) : req.user.id,
                 action: "stock_transfer_otp_resend",
                 message: `Stock Transfer OTP Resent: ${otp}. To ${to_type} ${targetId}`,
-                otp
+                otp,
+                created_at: now()   // ✅ explicit created_at
             }
         });
 
@@ -971,7 +1038,7 @@ const resendStockTransferOTP = async (req, res) => {
                     action: "stock_transfer_otp_resend",
                     message: `Your Stock Transfer OTP has been resent: ${otp}`,
                     otp,
-                    created_at: new Date()
+                    created_at: now()
                 });
             }
         }
@@ -1049,7 +1116,9 @@ const initiateStockBack = async (req, res) => {
                 phone: phoneKey,
                 otp,
                 purpose: 'stock_back',
-                expiresAt: new Date(Date.now() + 10 * 60000)
+                expiresAt: new Date(Date.now() + 10 * 60000),
+                createdAt: now(),   // ✅ explicit createdAt
+                updatedAt: now()    // ✅ explicit updatedAt
             }
         });
 
@@ -1115,33 +1184,49 @@ const verifyStockBack = async (req, res) => {
                     // Move from target outlet back to origin outlet
                     await tx.outletInventory.update({
                         where: { id: transfer.inventory_id },
-                        data: { outlet_id: transfer.from_id, status: 'In Stock' }
+                        data: { 
+                            outlet_id: transfer.from_id, 
+                            status: 'In Stock',
+                            updated_at: now()   // ✅ explicit updated_at
+                        }
                     });
                 } else if (transfer.to_type === 'Delivery Officer') {
                     // Mark as In Stock at origin outlet
                     await tx.outletInventory.update({
                         where: { id: transfer.inventory_id },
-                        data: { status: 'In Stock' }
+                        data: { 
+                            status: 'In Stock',
+                            updated_at: now()   // ✅ explicit updated_at
+                        }
                     });
                 }
             } else if (transfer.status === 'pending') {
                 // Just revert 'Pending Transfer' to 'In Stock' at origin
                 await tx.outletInventory.update({
                     where: { id: transfer.inventory_id },
-                    data: { status: 'In Stock' }
+                    data: { 
+                        status: 'In Stock',
+                        updated_at: now()   // ✅ explicit updated_at
+                    }
                 });
             }
 
-            // 1. Update StockTransfer status
+            // 2. Update StockTransfer status
             await tx.stockTransfer.update({
                 where: { id: parseInt(transfer_id) },
-                data: { status: 'Stock Back' }
+                data: { 
+                    status: 'Stock Back',
+                    updated_at: now()   // ✅ explicit updated_at
+                }
             });
 
             // 3. Mark OTP as used
             await tx.otp.update({
                 where: { id: otpRecord.id },
-                data: { isUsed: true }
+                data: { 
+                    isUsed: true,
+                    updatedAt: now()   // ✅ explicit updatedAt
+                }
             });
         });
 
@@ -1217,7 +1302,8 @@ const syncProductPlans = async (req, res) => {
         }));
 
         const updateData = {
-            installment_plans: formattedPlans
+            installment_plans: formattedPlans,
+            updated_at: now()   // ✅ explicit updated_at
         };
         if (new_price !== undefined && new_price !== null) {
             updateData.sale_price = parseFloat(new_price) || null;
@@ -1258,4 +1344,3 @@ module.exports = {
     generateInstallments,
     syncProductPlans
 };
-

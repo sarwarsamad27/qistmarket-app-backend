@@ -1,5 +1,7 @@
 const prisma = require('../../lib/prisma');
 
+const now = () => new Date();
+
 const getExpectedWorkMinutes = (startStr, endStr) => {
   if (!startStr || !endStr) return 480; // 8h default
   const parseTime = (t) => {
@@ -217,6 +219,7 @@ const updateOfficerProfile = async (req, res) => {
         ...(historyEntry && {
           officer_profile_history: [...existingHistory, historyEntry],
         }),
+        updated_at: now(),   // ✅ explicit updated_at
       },
       select: {
         bike_km_range: true,

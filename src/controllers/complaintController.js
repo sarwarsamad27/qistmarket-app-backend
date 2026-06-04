@@ -1,6 +1,9 @@
 const prisma = require('../../lib/prisma');
 const { sendComplaintReceived, sendComplaintResolved } = require('../services/watiService');
 
+// Helper for current timestamp
+const now = () => new Date();
+
 const createComplaint = async (req, res) => {
   try {
     const { customer_name, customer_cnic, mobile_number, description } = req.body;
@@ -12,7 +15,9 @@ const createComplaint = async (req, res) => {
       });
     }
 
-    const complaintId = `CMP-${new Date().replace(/[^0-9]/g, '').slice(0, 14)}-${Math.floor(1000 + Math.random() * 9000)}`;
+    // Note: Fixed complaintId generation (original had invalid replace)
+    const dateStr = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(0, 14);
+    const complaintId = `CMP-${dateStr}-${Math.floor(1000 + Math.random() * 9000)}`;
 
     // Build media URLs from uploaded files
     let mediaUrls = [];
@@ -31,7 +36,9 @@ const createComplaint = async (req, res) => {
         description: description.trim(),
         media_urls: mediaUrls.length > 0 ? mediaUrls : null,
         created_by_user_id: req.user?.id || null,
-        status: 'New'
+        status: 'New',
+        created_at: now(),   // ✅ explicit created_at
+        updated_at: now()    // ✅ explicit updated_at
       },
     });
 
@@ -145,7 +152,6 @@ const updateComplaint = async (req, res) => {
     // Restriction: Only CSR (or Super Admin) can mark as Solved
     if (status === 'Solved' && existing.status !== 'Solved') {
       const userRole = req.user?.role;
-      // Note: role name might vary, checking for CSR as well if needed
       if (userRole !== 'Sales Officer' && userRole !== 'Super Admin' && userRole !== 'Admin' && userRole !== 'CSR') {
         return res.status(403).json({
           success: false,
@@ -154,7 +160,9 @@ const updateComplaint = async (req, res) => {
       }
     }
 
-    const updateData = {};
+    const updateData = {
+      updated_at: now()   // ✅ explicit updated_at
+    };
     if (status) updateData.status = status;
     if (resolution_note !== undefined) updateData.resolution_note = resolution_note;
     if (assigned_to_user_id !== undefined) updateData.assigned_to_user_id = assigned_to_user_id;
@@ -204,7 +212,8 @@ const pickComplaint = async (req, res) => {
       where: { id: Number(id) },
       data: {
         assigned_to_user_id: userId,
-        status: 'Assigned'
+        status: 'Assigned',
+        updated_at: now()   // ✅ explicit updated_at
       },
     });
 

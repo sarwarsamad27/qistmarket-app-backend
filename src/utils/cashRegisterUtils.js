@@ -1,5 +1,8 @@
 const prisma = require('../../lib/prisma');
 
+// Helper for current timestamp
+const now = () => new Date();
+
 /**
  * Centrally updates the physical Cash Register (Daybook) for an outlet.
  * Maintains the exact cash inflows/outflows for a given day.
@@ -27,7 +30,6 @@ const updateCashRegister = async (tx, outletId, field, amount, operation) => {
     const outflows = ['expenses', 'vendor_payments'];
 
     // We use a find-create logic to ensure the row exists.
-    // However, to avoid transaction timeouts, we do the check/create quickly.
     let register = await db.cashRegister.findUnique({
         where: { outlet_id_date: { outlet_id: outletId, date: today } }
     });
@@ -45,17 +47,14 @@ const updateCashRegister = async (tx, outletId, field, amount, operation) => {
                 outlet_id: outletId,
                 date: today,
                 opening_cash: opening,
-                closing_cash: opening
+                closing_cash: opening,
+                created_at: now(),   // ✅ explicit created_at
+                updated_at: now()    // ✅ explicit updated_at
             }
         });
     }
 
     // Now perform atomic update to reduce lock time and prevent data structure mismatch
-    // 'add' to inflow field -> increment closing_cash
-    // 'add' to outflow field -> decrement closing_cash
-    // 'subtract' from inflow field -> decrement closing_cash
-    // 'subtract' from outflow field -> increment closing_cash
-
     let fieldUpdate = { increment: 0 };
     let closingUpdate = { increment: 0 };
 
@@ -79,7 +78,8 @@ const updateCashRegister = async (tx, outletId, field, amount, operation) => {
         where: { id: register.id },
         data: {
             [field]: fieldUpdate,
-            closing_cash: closingUpdate
+            closing_cash: closingUpdate,
+            updated_at: now()   // ✅ explicit updated_at
         }
     });
 };

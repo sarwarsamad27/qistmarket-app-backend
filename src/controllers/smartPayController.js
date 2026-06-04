@@ -3,6 +3,8 @@ const qrcode = require('qrcode');
 const jwt = require('jsonwebtoken');
 const { sendInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
 
+const now = () => new Date();
+
 const SMARTPAY_TOKEN_URL = 'https://smartpay.com.pk/services/api/v1/token';
 const SMARTPAY_DQR_URL = 'https://smartpay.com.pk/services/api/v1/DQR';
 
@@ -34,7 +36,7 @@ const generateSmartPayQr = async (req, res) => {
             });
 
             if (existingQr) {
-                const is_expired = existingQr.expires_at ? new Date(existingQr.expires_at) < new Date() : false;
+                const is_expired = existingQr.expires_at ? new Date(existingQr.expires_at) < now() : false;
                 
                 if (!is_expired) {
                     return res.json({
@@ -177,7 +179,7 @@ const generateSmartPayQr = async (req, res) => {
             return res.status(500).json({ success: false, message: 'Failed to render QR Code image' });
         }
 
-        // 6. Save in database
+        // 6. Save in database with explicit created_at (model has only created_at, no updated_at)
         const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours from now
         const savedQr = await prisma.smartPayQr.upsert({
             where: {
@@ -191,6 +193,7 @@ const generateSmartPayQr = async (req, res) => {
                 qr_image_base64: qrImageBase64,
                 amount: parseFloat(amount),
                 expires_at: expiresAt
+                // No updated_at field in SmartPayQr model
             },
             create: {
                 order_id: parseInt(order_id),
@@ -198,7 +201,8 @@ const generateSmartPayQr = async (req, res) => {
                 qr_string: qrString,
                 qr_image_base64: qrImageBase64,
                 amount: parseFloat(amount),
-                expires_at: expiresAt
+                expires_at: expiresAt,
+                created_at: now()   // ✅ explicit created_at
             }
         });
 
@@ -348,7 +352,8 @@ const notifyPayment = async (req, res) => {
                     timestamp: String(timestamp || ''),
                     billnumber: String(billnumber || ''),
                     status: 'received',
-                    is_duplicate: false
+                    is_duplicate: false,
+                    created_at: now()   // ✅ explicit created_at
                 }
             });
         } catch (e) {
@@ -357,7 +362,11 @@ const notifyPayment = async (req, res) => {
         }
 
         if (!billnumber || !transactionId || !amount) {
-            await prisma.smartPayPaymentLog.update({ where: { id: logEntry.id }, data: { status: "invalid_data" } });
+            await prisma.smartPayPaymentLog.update({ 
+                where: { id: logEntry.id }, 
+                data: { status: "invalid_data" } 
+                // No updated_at in SmartPayPaymentLog
+            });
             return res.status(400).json({ statusCode: "400", statusMessage: "Bad Request" });
         }
 
@@ -366,7 +375,10 @@ const notifyPayment = async (req, res) => {
         });
 
         if (!consumer) {
-            await prisma.smartPayPaymentLog.update({ where: { id: logEntry.id }, data: { status: "not_found" } });
+            await prisma.smartPayPaymentLog.update({ 
+                where: { id: logEntry.id }, 
+                data: { status: "not_found" } 
+            });
             return res.status(404).json({ statusCode: "404", statusMessage: "Consumer not found" });
         }
 
@@ -386,11 +398,14 @@ const notifyPayment = async (req, res) => {
         }
 
         if (consumer.bill_status === 'P') {
-            await prisma.smartPayPaymentLog.update({ where: { id: logEntry.id }, data: { status: "already_paid" } });
+            await prisma.smartPayPaymentLog.update({ 
+                where: { id: logEntry.id }, 
+                data: { status: "already_paid" } 
+            });
             return res.status(200).json({ statusCode: "200", statusMessage: "Success (Already Paid)" });
         }
 
-        let paidDateParsed = new Date();
+        let paidDateParsed = now();
         if (timestamp && timestamp.length >= 14) {
             // format: yyyyddmmhhMMss
             const year = timestamp.substring(0, 4);
@@ -478,7 +493,8 @@ const notifyPayment = async (req, res) => {
                                 amount: payThisRow,
                                 paymentMethod: `SmartPay QR - TxID: ${transactionId}`,
                                 is_submitted: true,
-                                paidAt: paidDateParsed
+                                paidAt: paidDateParsed,        // ✅ explicit paidAt
+                                created_at: now()              // ✅ explicit created_at
                             }
                         });
                     } catch (err) {
@@ -490,7 +506,10 @@ const notifyPayment = async (req, res) => {
             if (paymentApplied) {
                 await prisma.installmentLedger.update({
                     where: { id: ledger.id },
-                    data: { ledger_rows: rows }
+                    data: { 
+                        ledger_rows: rows,
+                        updated_at: now()   // ✅ explicit updated_at
+                    }
                 });
 
                 if (ledger.order) {
@@ -572,7 +591,7 @@ const notifyPayment = async (req, res) => {
                     }
                 }
 
-                // Update ALL ConsumerNumbers for this ledger
+                // Update ALL ConsumerNumbers for this ledger with explicit timestamps
                 await prisma.consumerNumber.updateMany({
                     where: { ledger_id: consumer.ledger_id },
                     data: {
@@ -581,9 +600,10 @@ const notifyPayment = async (req, res) => {
                         billing_month: billingMonthStr,
                         due_date: bd,
                         amount_paid: parsedAmountFinal,
-                        date_paid: paidDateParsed,
+                        date_paid: paidDateParsed,          // ✅ explicit date_paid
                         tran_auth_id: String(transactionId),
-                        bank_mnemonic: 'SMARTPAY'
+                        bank_mnemonic: 'SMARTPAY',
+                        updated_at: now()                   // ✅ explicit updated_at
                     }
                 });
             } else {
@@ -592,9 +612,10 @@ const notifyPayment = async (req, res) => {
                     data: {
                         bill_status: 'P',
                         amount_paid: parsedAmountFinal,
-                        date_paid: paidDateParsed,
+                        date_paid: paidDateParsed,          // ✅ explicit date_paid
                         tran_auth_id: String(transactionId),
-                        bank_mnemonic: 'SMARTPAY'
+                        bank_mnemonic: 'SMARTPAY',
+                        updated_at: now()                   // ✅ explicit updated_at
                     }
                 });
             }
@@ -605,9 +626,10 @@ const notifyPayment = async (req, res) => {
                 data: {
                     bill_status: 'P',
                     amount_paid: parsedAmountFinal,
-                    date_paid: paidDateParsed,
+                    date_paid: paidDateParsed,          // ✅ explicit date_paid
                     tran_auth_id: String(transactionId),
-                    bank_mnemonic: 'SMARTPAY'
+                    bank_mnemonic: 'SMARTPAY',
+                    updated_at: now()                   // ✅ explicit updated_at
                 }
             });
         }

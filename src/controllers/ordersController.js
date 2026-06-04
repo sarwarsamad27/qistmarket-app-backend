@@ -10,15 +10,22 @@ const { getOrCreateCustomer, checkRepeatStatus, updateCsrRanking, getWorkingDays
 
 const admin = require('firebase-admin');
 
+// ─── Firebase Init ────────────────────────────────────────────────
 if (!admin.apps.length) {
+  const _realDate = global._OriginalDate; // prisma.js ne set kiya hua hai
+  global.Date = _realDate;               // Firebase ke liye original date
+
   admin.initializeApp({
     credential: admin.credential.cert({
       projectId: process.env.FIREBASE_PROJECT_ID,
       clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+      privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
     }),
   });
+
+  global.Date = global._PKTDate;         // PKT date wapas
 }
+// ─────────────────────────────────────────────────────────────────
 
 async function sendOrderAssignmentNotification(order, user, type, io = null) {
   let title = 'New Order Assigned';
@@ -54,6 +61,8 @@ async function sendOrderAssignmentNotification(order, user, type, io = null) {
 
   if (!user?.fcm_token) return;
 
+  global.Date = global._OriginalDate;
+
   try {
     await admin.messaging().send({
       token: user.fcm_token,
@@ -66,7 +75,11 @@ async function sendOrderAssignmentNotification(order, user, type, io = null) {
     });
   } catch (fcmError) {
     console.error('FCM send failed:', fcmError);
+  } finally {
+    // ─── PKT date wapas lagao ───────────────────────
+    global.Date = global._PKTDate;
   }
+
 }
 
 async function sendOrderTransferNotification(order, outletId, io = null) {
@@ -199,7 +212,10 @@ const expireOrders = async (io = null) => {
   // Bulk update status to expired
   await prisma.order.updateMany({
     where: { id: { in: orderIds } },
-    data: { status: 'expired' },
+    data: { 
+      status: 'expired',
+      updated_at: new Date(),  
+   },
   });
 
   for (const order of ordersToExpire) {
@@ -755,6 +771,7 @@ const createOrderFromWebsitePickup = async (req, res) => {
         channel: channel || 'Website',
         status: 'new',
         created_at: new Date(),
+        updated_at: new Date(),
         created_by_user_id: req.user.id,
         assigned_to_user_id: null,
         verification_assigned_at: null,
@@ -1876,7 +1893,8 @@ const assignOrder = async (req, res) => {
         where: { id: parseInt(id) },
         data: {
           assigned_to_user_id: null,
-          verification_assigned_at: null
+          verification_assigned_at: null,
+          updated_at: new Date(), 
         },
         include: {
           created_by: { select: { username: true } },
@@ -1913,7 +1931,8 @@ const assignOrder = async (req, res) => {
       data: {
         assigned_to_user_id: parseInt(user_id),
         verification_assigned_at: new Date(),
-        status: order.status === 'in_progress' ? 'in_progress' : 'pending'
+        status: order.status === 'in_progress' ? 'in_progress' : 'pending',
+        updated_at: new Date(), 
       },
       include: {
         assigned_to: { select: { id: true, username: true, fcm_token: true } },
@@ -1975,7 +1994,8 @@ const assignBulk = async (req, res) => {
         },
         data: {
           assigned_to_user_id: null,
-          verification_assigned_at: null
+          verification_assigned_at: null,
+          updated_at: new Date(),
         },
       });
 
@@ -2015,7 +2035,8 @@ const assignBulk = async (req, res) => {
         data: {
           assigned_to_user_id: parseInt(user_id),
           verification_assigned_at: new Date(),
-          status: 'pending'
+          status: 'pending',
+          updated_at: new Date(),
         }
       }),
       // 2. Update orders that ARE in_progress to keep 'in_progress'
@@ -2027,7 +2048,8 @@ const assignBulk = async (req, res) => {
         data: {
           assigned_to_user_id: parseInt(user_id),
           verification_assigned_at: new Date(),
-          status: 'in_progress'
+          status: 'in_progress',
+          updated_at: new Date(),
         }
       }),
       prisma.verification.createMany({
@@ -2092,6 +2114,7 @@ const transferOrder = async (req, res) => {
           outlet_id: null,
           assigned_to_user_id: null,
           verification_assigned_at: null,
+          updated_at: new Date(),
         }
       });
 
@@ -2138,6 +2161,7 @@ const transferOrder = async (req, res) => {
         outlet_id: parseInt(outlet_id),
         assigned_to_user_id: null,
         verification_assigned_at: null,
+        updated_at: new Date(),
       },
       include: {
         outlet: { select: { name: true } }
@@ -2180,6 +2204,7 @@ const transferBulk = async (req, res) => {
           outlet_id: null,
           assigned_to_user_id: null,
           verification_assigned_at: null,
+          updated_at: new Date(),
         }
       });
 
@@ -2212,6 +2237,7 @@ const transferBulk = async (req, res) => {
         outlet_id: parseInt(outlet_id),
         assigned_to_user_id: null,
         verification_assigned_at: null,
+        updated_at: new Date(),
       }
     });
 
@@ -2430,6 +2456,8 @@ const assignDelivery = async (req, res) => {
   const { id } = req.params;
   const { user_id, action = 'assign' } = req.body;
 
+  console.log('Assigning delivery with params:', { id, user_id, action });
+
   try {
     const order = await prisma.order.findUnique({
       where: { id: Number(id) },
@@ -2443,7 +2471,8 @@ const assignDelivery = async (req, res) => {
         data: {
           delivery_officer_id: null,
           delivery_assigned_at: null,
-          status: 'approved'
+          status: 'approved',
+          updated_at: new Date(),
         },
         include: {
           delivery_officer: { select: { username: true } }
@@ -2465,15 +2494,21 @@ const assignDelivery = async (req, res) => {
 
     const officer = await prisma.user.findUnique({
       where: { id: Number(user_id) },
-      select: { outlet_id: true }
+      select: { 
+        outlet_id: true,
+        full_name: true
+       }
     });
+    
+    console.log('Officer found for delivery assignment:', officer);
 
     const updatedOrder = await prisma.order.update({
       where: { id: Number(id) },
       data: {
         delivery_officer_id: Number(user_id),
         delivery_assigned_at: new Date(),
-        status: 'picked'
+        status: 'picked',
+        updated_at: new Date(),
       },
       include: {
         delivery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true } }
@@ -2481,6 +2516,8 @@ const assignDelivery = async (req, res) => {
     });
 
     await logOrderStatusChange(updatedOrder.id, order.status, 'picked', req.user);
+
+    console.log(officer.full_name);
 
     const io = req.app.get('io');
     await notifyAdmins(
@@ -2530,7 +2567,8 @@ const assignBulkDelivery = async (req, res) => {
         data: {
           delivery_officer_id: null,
           delivery_assigned_at: null,
-          status: 'approved'
+          status: 'approved',
+          updated_at: new Date(),
         }
       });
       for (const orderId of order_ids) {
@@ -2549,7 +2587,10 @@ const assignBulkDelivery = async (req, res) => {
     // Get the officer's outlet ID
     const officer = await prisma.user.findUnique({
       where: { id: Number(user_id) },
-      select: { outlet_id: true }
+      select: { 
+        outlet_id: true,
+        full_name: true
+       }
     });
 
     await prisma.order.updateMany({
@@ -2557,7 +2598,8 @@ const assignBulkDelivery = async (req, res) => {
       data: {
         delivery_officer_id: Number(user_id),
         delivery_assigned_at: new Date(),
-        status: 'picked'
+        status: 'picked',
+        updated_at: new Date(),
       }
     });
 
@@ -2609,6 +2651,7 @@ const cancelOrder = async (req, res) => {
       data: {
         status: 'cancelled',
         cancelled_at: new Date(),
+        updated_at: new Date(), 
         cancelled_reason: reason || 'Cancelled by admin',
       },
     });
@@ -2664,37 +2707,39 @@ const updateOrderItem = async (req, res) => {
     const order = await prisma.order.findUnique({ where: { id: parseInt(id) } });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
-    const updatedOrder = await prisma.$transaction(async (tx) => {
-      if (product_name && product_name !== order.product_name) {
-        await tx.orderProductHistory.create({
-          data: {
-            order_id: order.id,
-            previous_product: order.product_name,
-            current_product: product_name,
-            changed_by_user_id: req.user.id,
-          },
-        });
-      }
-
-      return tx.order.update({
-        where: { id: parseInt(id) },
+    if (product_name && product_name !== order.product_name) {
+      await prisma.orderProductHistory.create({
         data: {
-          product_name,
-          total_amount: total_amount ? parseFloat(total_amount) : undefined,
-          advance_amount: advance_amount ? parseFloat(advance_amount) : undefined,
-          monthly_amount: monthly_amount ? parseFloat(monthly_amount) : undefined,
-          months: months ? parseInt(months) : undefined,
+          order_id: order.id,
+          previous_product: order.product_name,
+          current_product: product_name,
+          changed_by_user_id: req.user.id,
+          changed_at: new Date(),
         },
       });
+    }
+
+    const updatedOrder = await prisma.order.update({
+      where: { id: parseInt(id) },
+      data: {
+        product_name,
+        total_amount: total_amount ? parseFloat(total_amount) : undefined,
+        advance_amount: advance_amount ? parseFloat(advance_amount) : undefined,
+        monthly_amount: monthly_amount ? parseFloat(monthly_amount) : undefined,
+        months: months ? parseInt(months) : undefined,
+        updated_at: new Date(),
+      },
     });
 
-    await logAction(
-      req,
-      'ORDER_UPDATE',
-      `Order ${updatedOrder.order_ref} details or product name were updated.`,
-      updatedOrder.id,
-      'Order'
-    );
+    if (req.user.outlet_id) {
+      await logAction(
+        req,
+        'ORDER_UPDATE',
+        `Order ${updatedOrder.order_ref} details or product name were updated.`,
+        updatedOrder.id,
+        'Order'
+      );
+    }
 
     return res.status(200).json({
       success: true,
@@ -2844,7 +2889,8 @@ const assignRecovery = async (req, res) => {
       where: { id: parseInt(id) },
       data: {
         recovery_officer_id: parseInt(user_id),
-        recovery_assigned_at: new Date()
+        recovery_assigned_at: new Date(),
+        updated_at: new Date(),
       },
       include: {
         recovery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true } }
@@ -2876,7 +2922,8 @@ const assignBulkRecovery = async (req, res) => {
       where: { id: { in: order_ids.map(Number) } },
       data: {
         recovery_officer_id: parseInt(user_id),
-        recovery_assigned_at: new Date()
+        recovery_assigned_at: new Date(),
+        updated_at: new Date(),
       },
     });
 
@@ -2999,11 +3046,13 @@ const verifyHandover = async (req, res) => {
         data: {
           status: 'picked',
           imei_serial: imei_serial,
+          updated_at: new Date(),
         }
       }),
       prisma.outletInventory.update({
         where: { id: inventoryItem.id },
-        data: { status: 'Sold' }
+        data: { status: 'Sold' },
+        updated_at: new Date(),
       }),
       prisma.stockTransfer.create({
         data: {
@@ -3011,7 +3060,9 @@ const verifyHandover = async (req, res) => {
           from_id: order.outlet_id || 0,
           to_type: 'Delivery Officer',
           to_id: order.delivery_officer_id || 0,
-          inventory_id: inventoryItem.id
+          inventory_id: inventoryItem.id,
+          created_at: new Date(),
+          updated_at: new Date(), 
         }
       })
     ]);
@@ -3400,6 +3451,8 @@ const createConvertedSale = async (req, res) => {
         status: 'completed',
         start_time: new Date(),
         end_time: new Date(),
+        created_at: new Date(),
+        updated_at: new Date(), 
         verification_feedback: 'Repeat customer converted sale.',
         purchaser: {
           create: {

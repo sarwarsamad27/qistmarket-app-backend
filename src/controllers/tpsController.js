@@ -2,6 +2,8 @@ const prisma = require('../../lib/prisma');
 const { parseTpsAmount, formatTpsAmount, formatTpsAmountPaid } = require('../utils/tpsAmountUtils');
 const { sendInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
 
+const now = () => new Date();
+
 // ─────────────────────────────────────────────────────────────────────────────
 // TPS / 1LINK strict API Implementation
 // ─────────────────────────────────────────────────────────────────────────────
@@ -208,7 +210,8 @@ const billPayment = async (req, res) => {
                     bank_mnemonic: String(bank_mnemonic || ''),
                     reserved: reserved || null,
                     response_code_sent: "00", // Will be updated if an error occurs
-                    is_duplicate: false
+                    is_duplicate: false,
+                    created_at: now()   // ✅ explicit created_at
                 }
             });
         } catch (logErr) {
@@ -263,7 +266,7 @@ const billPayment = async (req, res) => {
         const parsedAmountFinal = parseTpsAmount(transaction_amount);
 
         // 7. Process payment in the main system and rollover the Consumer Number
-        let paidDateParsed = new Date();
+        let paidDateParsed = now();
         if (typeof tran_date === 'string' && tran_date.length === 8) {
             const year = tran_date.substring(0, 4);
             const month = tran_date.substring(4, 6);
@@ -349,7 +352,8 @@ const billPayment = async (req, res) => {
                                 amount: payThisRow,
                                 paymentMethod: `1LINK TPS - ${bank_mnemonic || ''}`,
                                 is_submitted: true,
-                                paidAt: paidDateParsed
+                                paidAt: paidDateParsed,        // ✅ explicit paidAt
+                                created_at: now()              // ✅ explicit created_at
                             }
                         });
                     } catch (paymentLogErr) {
@@ -362,7 +366,10 @@ const billPayment = async (req, res) => {
                 // Update the complete ledger
                 await prisma.installmentLedger.update({
                     where: { id: ledger.id },
-                    data: { ledger_rows: rows }
+                    data: { 
+                        ledger_rows: rows,
+                        updated_at: now()   // ✅ explicit updated_at
+                    }
                 });
 
                 // Send Wati Notification
@@ -471,15 +478,14 @@ const billPayment = async (req, res) => {
                     data: {
                         bill_status: 'U', // Cycle to Unpaid for the next month!
                         amount_due: accumulatedDue,
-
                         billing_month: billingMonthStr,
                         due_date: bd,
-
                         // Keep track of the last payment made
                         amount_paid: parsedAmountFinal,
                         date_paid: paidDateParsed,
                         tran_auth_id: String(tran_auth_id),
-                        bank_mnemonic: String(bank_mnemonic)
+                        bank_mnemonic: String(bank_mnemonic),
+                        updated_at: now()   // ✅ explicit updated_at
                     }
                 });
             } else {
@@ -491,7 +497,8 @@ const billPayment = async (req, res) => {
                         amount_paid: parsedAmountFinal,
                         date_paid: paidDateParsed,
                         tran_auth_id: String(tran_auth_id),
-                        bank_mnemonic: String(bank_mnemonic)
+                        bank_mnemonic: String(bank_mnemonic),
+                        updated_at: now()   // ✅ explicit updated_at
                     }
                 });
             }
@@ -505,7 +512,8 @@ const billPayment = async (req, res) => {
                     amount_paid: parsedAmountFinal,
                     date_paid: paidDateParsed,
                     tran_auth_id: String(tran_auth_id),
-                    bank_mnemonic: String(bank_mnemonic)
+                    bank_mnemonic: String(bank_mnemonic),
+                    updated_at: now()   // ✅ explicit updated_at
                 }
             });
         }

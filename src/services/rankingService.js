@@ -1,6 +1,9 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
+// Helper for current timestamp
+const now = () => new Date();
+
 /**
  * Identifies or creates a unique customer based on CNIC or Mobile Number.
  */
@@ -39,7 +42,9 @@ async function getOrCreateCustomer(orderId) {
             data: {
                 cnic: cnic || null,
                 mobile: mobile,
-                name: name
+                name: name,
+                created_at: now(),   // ✅ explicit created_at
+                updated_at: now()    // ✅ explicit updated_at
             }
         });
     } else {
@@ -47,7 +52,10 @@ async function getOrCreateCustomer(orderId) {
         if (cnic && !customer.cnic) {
             customer = await prisma.customer.update({
                 where: { id: customer.id },
-                data: { cnic }
+                data: {
+                    cnic,
+                    updated_at: now()   // ✅ explicit updated_at
+                }
             });
         }
     }
@@ -81,19 +89,19 @@ async function checkRepeatStatus(customerId, currentOrderId) {
  * Recalculates ranking for a CSR for a specific period.
  */
 async function updateCsrRanking(csrId, periodType = 'month') {
-    const now = new Date();
+    const nowDate = new Date();
     let start, end;
 
     if (periodType === 'month') {
-        start = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
-        end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+        start = new Date(nowDate.getFullYear(), nowDate.getMonth(), 1, 0, 0, 0, 0);
+        end = new Date(nowDate.getFullYear(), nowDate.getMonth() + 1, 0, 23, 59, 59, 999);
     } else if (periodType === 'today') {
-        start = new Date(now); start.setHours(0, 0, 0, 0);
-        end = new Date(now); end.setHours(23, 59, 59, 999);
+        start = new Date(nowDate); start.setHours(0, 0, 0, 0);
+        end = new Date(nowDate); end.setHours(23, 59, 59, 999);
     } else if (periodType === 'week') {
-        const day = now.getDay();
-        const diff = now.getDate() - day + (day === 0 ? -6 : 1); // Monday
-        start = new Date(now.setDate(diff)); start.setHours(0, 0, 0, 0);
+        const day = nowDate.getDay();
+        const diff = nowDate.getDate() - day + (day === 0 ? -6 : 1); // Monday
+        start = new Date(nowDate.setDate(diff)); start.setHours(0, 0, 0, 0);
         end = new Date(start); end.setDate(start.getDate() + 6); end.setHours(23, 59, 59, 999);
     }
 
@@ -112,7 +120,6 @@ async function updateCsrRanking(csrId, periodType = 'month') {
     const uniqueCustomersCount = uniqueCustomerIds.size;
 
     // Metrics based on UNIQUE CUSTOMERS
-    // We group orders by customer to count each customer once per status
     const customerStats = {};
 
     orders.forEach(order => {
@@ -164,7 +171,6 @@ async function updateCsrRanking(csrId, periodType = 'month') {
     });
 
     // Scoring Formula
-    // Final Score = (Delivered × 10) + (Repeat × 5) + (Completed × 5) + (COMPLAINTS SOLVED × 1) - (Cancelled × 1) - (Expired × 3)
     const score = (deliveredCount * 10) + (repeatCount * 5) + (completedCount * 5) + (solvedComplaintsCount * 1) - (cancelledCount * 1) - (expiredCount * 3);
 
     // Fetch existing ranking to calculate trend
@@ -173,8 +179,8 @@ async function updateCsrRanking(csrId, periodType = 'month') {
             csr_id_period_month_year: {
                 csr_id: csrId,
                 period: periodType,
-                month: periodType === 'month' ? now.getMonth() + 1 : 0,
-                year: periodType === 'month' ? now.getFullYear() : 0
+                month: periodType === 'month' ? nowDate.getMonth() + 1 : 0,
+                year: periodType === 'month' ? nowDate.getFullYear() : 0
             }
         }
     });
@@ -190,8 +196,8 @@ async function updateCsrRanking(csrId, periodType = 'month') {
             csr_id_period_month_year: {
                 csr_id: csrId,
                 period: periodType,
-                month: periodType === 'month' ? now.getMonth() + 1 : 0,
-                year: periodType === 'month' ? now.getFullYear() : 0
+                month: periodType === 'month' ? nowDate.getMonth() + 1 : 0,
+                year: periodType === 'month' ? nowDate.getFullYear() : 0
             }
         },
         update: {
@@ -204,13 +210,13 @@ async function updateCsrRanking(csrId, periodType = 'month') {
             total_sales: totalSales,
             score: score,
             trend: trend,
-            updated_at: new Date()
+            updated_at: now()   // ✅ explicit updated_at
         },
         create: {
             csr_id: csrId,
             period: periodType,
-            month: periodType === 'month' ? now.getMonth() + 1 : 0,
-            year: periodType === 'month' ? now.getFullYear() : 0,
+            month: periodType === 'month' ? nowDate.getMonth() + 1 : 0,
+            year: periodType === 'month' ? nowDate.getFullYear() : 0,
             unique_customers: uniqueCustomersCount,
             delivered_customers: deliveredCount,
             completed_customers: completedCount,
@@ -219,7 +225,8 @@ async function updateCsrRanking(csrId, periodType = 'month') {
             expired_customers: expiredCount,
             total_sales: totalSales,
             score: score,
-            trend: 0
+            trend: 0,
+            updated_at: now()   // ✅ explicit updated_at (since model has only updated_at)
         }
     });
 
@@ -230,11 +237,11 @@ async function updateCsrRanking(csrId, periodType = 'month') {
  * Calculates working days left in the current month, skipping Sundays.
  */
 function getWorkingDaysLeftInMonth() {
-    const now = new Date();
-    const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    const nowDate = new Date();
+    const lastDay = new Date(nowDate.getFullYear(), nowDate.getMonth() + 1, 0);
 
     let workingDays = 0;
-    let current = new Date(now);
+    let current = new Date(nowDate);
     // Start from tomorrow
     current.setDate(current.getDate() + 1);
 

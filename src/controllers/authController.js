@@ -9,6 +9,8 @@ const { logAction } = require('../utils/auditLogger');
 
 const { notifyAdmins } = require('../utils/notificationUtils');
 
+const now = () => new Date();
+
 const sendLoginOTP = async (req, res) => {
   const { identifier } = req.body;  // identifier can be phone or email
 
@@ -206,6 +208,7 @@ const verifyLoginOTP = async (req, res) => {
     if (fcm_token) updateData.fcm_token = fcm_token;
 
     if (Object.keys(updateData).length > 0) {
+      updateData.updated_at = now();
       await prisma.user.update({ where: { id: user.id }, data: updateData });
     }
 
@@ -359,6 +362,8 @@ const signup = async (req, res) => {
         password_hash: hashedPassword,
         outlet_id: outlet_id ? parseInt(outlet_id) : null,
         status: 'active',
+        created_at: now(),
+        updated_at: now() 
       },
       include: { role: true, outlet: true },
     });
@@ -413,7 +418,10 @@ const toggleUserStatus = async (req, res) => {
 
     const updatedUser = await prisma.user.update({
       where: { id: parseInt(userId) },
-      data: { status },
+      data: {
+        status,
+        updated_at: now()
+      },
       include: { role: true },
     });
 
@@ -602,6 +610,7 @@ const editUser = async (req, res) => {
       ...(bio && { bio }),
       ...(image && { image }),
       ...(coverImage && { coverImage }),
+      updated_at: now()  
     };
 
     if (outlet_id !== undefined) {
@@ -665,7 +674,10 @@ const updateUserPermissions = async (req, res) => {
 
     const updated = await prisma.user.update({
       where: { id: parseInt(userId) },
-      data: { permissions_json: permissions_json },
+      data: { 
+        permissions_json: permissions_json,
+        updated_at: now()
+       },
       include: { role: true },
     });
 
@@ -773,7 +785,7 @@ const updateProfile = async (req, res) => {
   }
 
   try {
-    const updateData = {};
+     const updateData = { updated_at: now() }; 
 
     if (full_name !== undefined) updateData.full_name = full_name.trim();
     if (email !== undefined) updateData.email = email ? email.toLowerCase().trim() : null;

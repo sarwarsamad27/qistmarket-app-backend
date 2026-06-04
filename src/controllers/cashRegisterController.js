@@ -1,5 +1,8 @@
 const prisma = require('../../lib/prisma');
 
+// Helper for current timestamp
+const now = () => new Date();
+
 const getCashRegister = async (req, res) => {
     const { outlet_id } = req.user;
     if (!outlet_id) return res.status(403).json({ success: false, message: 'Not an outlet user.' });
@@ -24,10 +27,7 @@ const calculateDailyCash = async (req, res) => {
         const today = new Date();
         today.setHours(0, 0, 0, 0);
 
-        // This requires detailed aggregation over the day's payments (downpayments vs installments)
-        // and expenses. For now, we will create a skeleton calculation or retrieve the existing one.
-
-        // Simplified view: find today's register or create a new one based on aggregates
+        // Find today's register or create a new one
         let register = await prisma.cashRegister.findUnique({
             where: {
                 outlet_id_date: {
@@ -37,14 +37,14 @@ const calculateDailyCash = async (req, res) => {
             }
         });
 
-        // Normally here you would run sums on OrderPayment (if tied to this outlet), Expenses, etc.
-        // For demonstration, we just return the skeleton or create an empty one.
         if (!register) {
             register = await prisma.cashRegister.create({
                 data: {
                     outlet_id,
                     date: today,
-                    opening_cash: 0 // Fetch yesterday's closing
+                    opening_cash: 0, // Ideally fetch yesterday's closing
+                    created_at: now(),   // ✅ explicit created_at
+                    updated_at: now()    // ✅ explicit updated_at
                 }
             });
         }

@@ -4,6 +4,9 @@ const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { logAction } = require('../utils/auditLogger');
 const { generateInstallments } = require('./inventoryController');
 
+// Helper for current timestamp
+const now = () => new Date();
+
 const QIST_MARKET_API = 'https://api.qistmarket.pk/api/product';
 
 // Fetch all products from qistmarket.pk and build a lowercase name → product map
@@ -107,7 +110,15 @@ const createVendor = async (req, res) => {
 
     try {
         const vendor = await prisma.vendor.create({
-            data: { outlet_id, name, phone, email, address }
+            data: {
+                outlet_id,
+                name,
+                phone,
+                email,
+                address,
+                created_at: now(),   // ✅ explicit created_at
+                updated_at: now()    // ✅ explicit updated_at
+            }
         });
         res.status(201).json({ success: true, vendor });
     } catch (error) {
@@ -123,7 +134,13 @@ const updateVendor = async (req, res) => {
     try {
         const vendor = await prisma.vendor.update({
             where: { id: parseInt(id) },
-            data: { name, phone, email, address }
+            data: {
+                name,
+                phone,
+                email,
+                address,
+                updated_at: now()   // ✅ explicit updated_at
+            }
         });
         res.json({ success: true, vendor });
     } catch (error) {
@@ -161,7 +178,12 @@ const createPurchase = async (req, res) => {
                 });
                 if (!existingVendor) {
                     existingVendor = await tx.vendor.create({
-                        data: { outlet_id, name: vendor_name }
+                        data: {
+                            outlet_id,
+                            name: vendor_name,
+                            created_at: now(),
+                            updated_at: now()
+                        }
                     });
                 }
                 finalVendorId = existingVendor.id;
@@ -235,7 +257,8 @@ const createPurchase = async (req, res) => {
                             color_variant: item.color_variant || existingItem.color_variant,
                             installment_plans: resolvedPlans,
                             sale_price: resolvedSalePrice,
-                            api_product_name: resolvedApiProductName
+                            api_product_name: resolvedApiProductName,
+                            updated_at: now()   // ✅ explicit updated_at
                         }
                     });
                 } else {
@@ -252,7 +275,9 @@ const createPurchase = async (req, res) => {
                             installment_plans: resolvedPlans,
                             sale_price: resolvedSalePrice,
                             api_product_name: resolvedApiProductName,
-                            status: 'In Stock'
+                            status: 'In Stock',
+                            created_at: now(),
+                            updated_at: now()
                         }
                     });
                 }
@@ -269,7 +294,9 @@ const createPurchase = async (req, res) => {
                     balance: totalAmount,
                     status: 'Unpaid',
                     due_date: due_date ? new Date(due_date) : null,
-                    purchase_date: purchase_date ? new Date(purchase_date) : new Date(),
+                    purchase_date: purchase_date ? new Date(purchase_date) : now(),
+                    created_at: now(),
+                    updated_at: now(),
                     items: {
                         create: purchaseItemsData
                     }
@@ -281,7 +308,7 @@ const createPurchase = async (req, res) => {
             if (finalVendorId) {
                 await tx.vendor.update({
                     where: { id: finalVendorId },
-                    data: { balance: { increment: totalAmount } }
+                    data: { balance: { increment: totalAmount }, updated_at: now() }
                 });
             }
 
@@ -349,7 +376,12 @@ const updatePurchase = async (req, res) => {
                 });
                 if (!existingVendor) {
                     existingVendor = await tx.vendor.create({
-                        data: { outlet_id, name: vendor_name }
+                        data: {
+                            outlet_id,
+                            name: vendor_name,
+                            created_at: now(),
+                            updated_at: now()
+                        }
                     });
                 }
                 finalVendorId = existingVendor.id;
@@ -401,7 +433,10 @@ const updatePurchase = async (req, res) => {
                     } else {
                         await tx.outletInventory.update({
                             where: { id: inventoryItem.id },
-                            data: { quantity: newQty }
+                            data: {
+                                quantity: newQty,
+                                updated_at: now()
+                            }
                         });
                     }
                 }
@@ -498,7 +533,8 @@ const updatePurchase = async (req, res) => {
                                 purchase_price: unitPrice,
                                 installment_plans: updPlans,
                                 sale_price: updSalePrice,
-                                api_product_name: updApiName
+                                api_product_name: updApiName,
+                                updated_at: now()
                             }
                         });
                     }
@@ -555,7 +591,8 @@ const updatePurchase = async (req, res) => {
                                 purchase_price: unitPrice,
                                 installment_plans: newPlans,
                                 sale_price: newSalePrice,
-                                api_product_name: newApiName
+                                api_product_name: newApiName,
+                                updated_at: now()
                             }
                         });
                     } else {
@@ -572,7 +609,9 @@ const updatePurchase = async (req, res) => {
                                 installment_plans: newPlans,
                                 sale_price: newSalePrice,
                                 api_product_name: newApiName,
-                                status: 'In Stock'
+                                status: 'In Stock',
+                                created_at: now(),
+                                updated_at: now()
                             }
                         });
                     }
@@ -612,7 +651,8 @@ const updatePurchase = async (req, res) => {
                     status: newStatus,
                     purchase_date: purchase_date ? new Date(purchase_date) : purchase.purchase_date,
                     due_date: due_date ? new Date(due_date) : purchase.due_date,
-                    notes: notes !== undefined ? notes : purchase.notes
+                    notes: notes !== undefined ? notes : purchase.notes,
+                    updated_at: now()
                 },
                 include: { items: true }
             });
@@ -622,19 +662,19 @@ const updatePurchase = async (req, res) => {
                 if (purchase.vendor_id) {
                     await tx.vendor.update({
                         where: { id: purchase.vendor_id },
-                        data: { balance: { decrement: purchase.balance } }
+                        data: { balance: { decrement: purchase.balance }, updated_at: now() }
                     });
                 }
                 if (finalVendorId) {
                     await tx.vendor.update({
                         where: { id: finalVendorId },
-                        data: { balance: { increment: newBalance } }
+                        data: { balance: { increment: newBalance }, updated_at: now() }
                     });
                 }
             } else if (finalVendorId && amountDiff !== 0) {
                 await tx.vendor.update({
                     where: { id: finalVendorId },
-                    data: { balance: { increment: amountDiff } }
+                    data: { balance: { increment: amountDiff }, updated_at: now() }
                 });
             }
 
@@ -651,7 +691,8 @@ const updatePurchase = async (req, res) => {
                     edited_by_id: req.user.id,
                     previous_data: previousData,
                     new_data: updatedPurchase,
-                    changes_summary: finalSummary
+                    changes_summary: finalSummary,
+                    edited_at: now()
                 }
             });
 
@@ -715,7 +756,8 @@ const recordPayment = async (req, res) => {
                     vendor_name: purchase.vendor_name,
                     amount: amtNum,
                     payment_method,
-                    notes
+                    notes,
+                    created_at: now()   // ✅ explicit created_at
                 }
             });
 
@@ -724,7 +766,8 @@ const recordPayment = async (req, res) => {
                 data: {
                     paid_amount: newPaidAmount,
                     balance: newBalance,
-                    status
+                    status,
+                    updated_at: now()
                 }
             });
 
@@ -732,7 +775,7 @@ const recordPayment = async (req, res) => {
             if (purchase.vendor_id) {
                 await tx.vendor.update({
                     where: { id: purchase.vendor_id },
-                    data: { balance: { decrement: amtNum } }
+                    data: { balance: { decrement: amtNum }, updated_at: now() }
                 });
             }
 
@@ -1020,7 +1063,7 @@ const deletePurchase = async (req, res) => {
                     // Reduce quantity
                     await tx.outletInventory.update({
                         where: { id: inventoryItem.id },
-                        data: { quantity: newQty }
+                        data: { quantity: newQty, updated_at: now() }
                     });
                 }
             }
@@ -1029,7 +1072,7 @@ const deletePurchase = async (req, res) => {
             if (purchase.vendor_id) {
                 await tx.vendor.update({
                     where: { id: purchase.vendor_id },
-                    data: { balance: { decrement: purchase.total_amount - purchase.paid_amount } }
+                    data: { balance: { decrement: purchase.total_amount - purchase.paid_amount }, updated_at: now() }
                 });
             }
 
@@ -1125,12 +1168,15 @@ const createPurchaseReturn = async (req, res) => {
                 } else {
                     await tx.outletInventory.update({
                         where: { id: inventoryItem.id },
-                        data: { quantity: newQty }
+                        data: {
+                            quantity: newQty,
+                            updated_at: now()
+                        }
                     });
                 }
             }
 
-            // Create Return Record
+            // Create Return Record with explicit timestamps
             const purchaseReturn = await tx.vendorPurchaseReturn.create({
                 data: {
                     outlet_id,
@@ -1140,7 +1186,9 @@ const createPurchaseReturn = async (req, res) => {
                     vendor_name: vendor.name,
                     notes,
                     total_amount: totalReturnAmount,
-                    return_date: return_date ? new Date(return_date) : new Date(),
+                    return_date: return_date ? new Date(return_date) : now(),
+                    created_at: now(),
+                    updated_at: now(),
                     items: {
                         create: returnItemsData
                     }
@@ -1151,7 +1199,7 @@ const createPurchaseReturn = async (req, res) => {
             // Update Vendor Balance (Return reduces what we owe)
             await tx.vendor.update({
                 where: { id: finalVendorId },
-                data: { balance: { decrement: totalReturnAmount } }
+                data: { balance: { decrement: totalReturnAmount }, updated_at: now() }
             });
 
             // If linked to a purchase, adjust its balance too
@@ -1167,7 +1215,8 @@ const createPurchaseReturn = async (req, res) => {
                         where: { id: purchase.id },
                         data: {
                             balance: newBalance,
-                            status: newStatus
+                            status: newStatus,
+                            updated_at: now()
                         }
                     });
                 }

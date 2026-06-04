@@ -1,5 +1,8 @@
 const prisma = require('../../lib/prisma');
 
+// Helper for current timestamp
+const now = () => new Date();
+
 async function createOfficerTransaction(data, tx = prisma) {
   const { officer_id, type, amount, status, description, payment_method, order_ref, submission_ref } = data;
 
@@ -29,7 +32,8 @@ async function createOfficerTransaction(data, tx = prisma) {
       description,
       payment_method,
       order_ref,
-      submission_ref
+      submission_ref,
+      transaction_date: now()   // ✅ explicit timestamp
     }
   });
 

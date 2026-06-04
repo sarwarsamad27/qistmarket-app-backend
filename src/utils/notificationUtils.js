@@ -1,5 +1,8 @@
 const prisma = require('../../lib/prisma');
 
+// Helper for current timestamp
+const now = () => new Date();
+
 /**
  * Notify all active admins
  */
@@ -21,7 +24,8 @@ const notifyAdmins = async (title, message, type, relatedId = null, io = null) =
             message,
             type,
             relatedId: relatedId ? parseInt(relatedId) : null,
-            createdAt: new Date()
+            createdAt: now(),   // ✅ explicit
+            updatedAt: now()    // ✅ explicit
         }));
 
         await prisma.notification.createMany({ data: notificationData });
@@ -34,7 +38,8 @@ const notifyAdmins = async (title, message, type, relatedId = null, io = null) =
                 type,
                 relatedId,
                 isRead: false,
-                createdAt: new Date(),
+                createdAt: now(),
+                updatedAt: now()
             });
         }
     } catch (err) {
@@ -54,7 +59,8 @@ const notifyUser = async (userId, title, message, type, relatedId = null, io = n
                 message,
                 type,
                 relatedId: relatedId ? parseInt(relatedId) : null,
-                createdAt: new Date()
+                createdAt: now(),   // ✅ explicit
+                updatedAt: now()    // ✅ explicit
             }
         });
 
@@ -66,7 +72,8 @@ const notifyUser = async (userId, title, message, type, relatedId = null, io = n
                 type,
                 relatedId,
                 isRead: false,
-                createdAt: notification.createdAt
+                createdAt: notification.createdAt,
+                updatedAt: notification.updatedAt
             });
         }
     } catch (err) {
@@ -96,7 +103,8 @@ const notifyOutlet = async (outletId, title, message, type, relatedId = null, io
             message,
             type,
             relatedId: relatedId ? parseInt(relatedId) : null,
-            createdAt: new Date()
+            createdAt: now(),   // ✅ explicit
+            updatedAt: now()    // ✅ explicit
         }));
 
         await prisma.notification.createMany({ data: notificationData });
@@ -109,7 +117,8 @@ const notifyOutlet = async (outletId, title, message, type, relatedId = null, io
                 type,
                 relatedId,
                 isRead: false,
-                createdAt: new Date(),
+                createdAt: now(),
+                updatedAt: now()
             });
         }
     } catch (err) {

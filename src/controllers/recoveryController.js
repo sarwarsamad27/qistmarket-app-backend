@@ -11,6 +11,8 @@ const { logAction } = require('../utils/auditLogger');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
 const { createOfficerTransaction } = require('../utils/officerTransactionUtils');
 
+const now = () => new Date();
+
 const getExpectedWorkMinutes = (startStr, endStr) => {
   if (!startStr || !endStr) return 480; // 8h default
   const parseTime = (t) => {
@@ -518,11 +520,12 @@ const logRecoveryVisit = async (req, res) => {
           officer_id: officerId,
           latitude: latitude ? parseFloat(latitude) : null,
           longitude: longitude ? parseFloat(longitude) : null,
-          visit_time: new Date(),
+          visit_time: now(),
           customer_feedback,
           visit_notes,
           payment_collected: false,
           amount_collected: null,
+          created_at: now()   // ✅ explicit created_at
         }
       });
 
@@ -539,7 +542,8 @@ const logRecoveryVisit = async (req, res) => {
         photoRecords.push({
           recovery_visit_id: visit.id,
           file_url: profilePhotoUrl,
-          photo_type: 'profile'
+          photo_type: 'profile',
+          uploaded_at: now()   // ✅ explicit uploaded_at
         });
       }
 
@@ -548,7 +552,8 @@ const logRecoveryVisit = async (req, res) => {
         photoRecords.push({
           recovery_visit_id: visit.id,
           file_url: file.url,
-          photo_type: 'visit_location'
+          photo_type: 'visit_location',
+          uploaded_at: now()   // ✅ explicit uploaded_at
         });
       });
 
@@ -626,7 +631,7 @@ const submitInstallment = async (req, res) => {
     // DB Transaction
     await prisma.$transaction(async (tx) => {
       rows[rowIndex].paid_amount = totalPaid;
-      rows[rowIndex].paid_at = new Date();
+      rows[rowIndex].paid_at = now();
       rows[rowIndex].payment_method = payment_method;
       rows[rowIndex].feedback = feedback;
       rows[rowIndex].collected_by = officerId;
@@ -642,7 +647,10 @@ const submitInstallment = async (req, res) => {
 
       await tx.installmentLedger.update({
         where: { id: ledger.id },
-        data: { ledger_rows: rows }
+        data: { 
+          ledger_rows: rows,
+          updated_at: now()   // ✅ explicit updated_at
+        }
       });
 
       // CashInHand entry (sirf cash payment ke liye)
@@ -660,12 +668,13 @@ const submitInstallment = async (req, res) => {
             imei_serial: imeiSerial || order.imei_serial,
             payment_method: payment_method,
             cash_type: 'Installment payment',         
-            submitted_amount: 0,                                              
-            created_at: new Date(),
+            submitted_amount: 0,
+            created_at: now(),   // ✅ explicit created_at
+            updated_at: now()    // ✅ explicit updated_at
           }
         });
 
-        // Create Officer Transaction for this credit
+        // Create Officer Transaction for this credit (helper handles its own timestamps)
         await createOfficerTransaction({
           officer_id: officerId,
           type: 'credit',
@@ -684,11 +693,12 @@ const submitInstallment = async (req, res) => {
           officer_id: officerId,
           latitude: latitude ? parseFloat(latitude) : null,
           longitude: longitude ? parseFloat(longitude) : null,
-          visit_time: new Date(),
+          visit_time: now(),
           customer_feedback: feedback,
           visit_notes: visit_notes,
           payment_collected: true,
           amount_collected: payingNow,
+          created_at: now()   // ✅ explicit created_at
         }
       });
 
@@ -701,7 +711,8 @@ const submitInstallment = async (req, res) => {
         photoRecords.push({
           recovery_visit_id: visit.id,
           file_url: profilePhotoUrl,
-          photo_type: 'profile'
+          photo_type: 'profile',
+          uploaded_at: now()   // ✅ explicit uploaded_at
         });
       }
 
@@ -710,7 +721,8 @@ const submitInstallment = async (req, res) => {
         photoRecords.push({
           recovery_visit_id: visit.id,
           file_url: file.url,
-          photo_type: 'visit_location'
+          photo_type: 'visit_location',
+          uploaded_at: now()   // ✅ explicit uploaded_at
         });
       });
 
@@ -722,7 +734,7 @@ const submitInstallment = async (req, res) => {
       }
     });
 
-    // Wati Notifications
+    // Wati Notifications (unchanged)
     const customerName = order.verification?.purchaser?.name || order.customer_name;
     const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
 
@@ -756,13 +768,7 @@ const submitInstallment = async (req, res) => {
       }).catch(err => console.error('Wati Reminder Error:', err));
     }
 
-    // await logAction(
-    //   req,
-    //   'INSTALLMENT_COLLECTION',
-    //   `Collected PKR ${paidAmount} from ${customerName} for order ${order.order_ref} (Month: ${month_number}).`,
-    //   order.id,
-    //   'Order'
-    // );
+    // await logAction(...) commented out
 
     return res.json({ success: true, message: 'Payment processed successfully' });
   } catch (error) {
@@ -827,7 +833,7 @@ const replaceRecoveryVisitPhoto = async (req, res) => {
       where: { id: parseInt(photo_id) },
       data: {
         file_url: req.file.url,
-        uploaded_at: new Date()
+        uploaded_at: now()   // ✅ explicit uploaded_at
       },
       include: {
         recovery_visit: {
@@ -842,7 +848,7 @@ const replaceRecoveryVisitPhoto = async (req, res) => {
       }
     });
 
-    // Log to edit history (if verification exists)
+    // Log to edit history with explicit edited_at
     if (updated.recovery_visit.order.verification) {
       await prisma.verificationEditHistory.create({
         data: {
@@ -854,7 +860,7 @@ const replaceRecoveryVisitPhoto = async (req, res) => {
           new_value: updated.file_url,
           edited_by_id: req.user.id,
           edited_by_name: req.user.full_name,
-          edited_at: new Date()
+          edited_at: now()   // ✅ explicit edited_at
         }
       });
     }

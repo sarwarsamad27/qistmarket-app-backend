@@ -1,5 +1,8 @@
 const prisma = require('../../lib/prisma');
 
+// Helper for current timestamp
+const now = () => new Date();
+
 const getNotifications = async (req, res) => {
     const { page = 1, limit = 10, status = 'all' } = req.query;
     const skip = (Number(page) - 1) * Number(limit);
@@ -71,7 +74,10 @@ const markAsRead = async (req, res) => {
 
         const updated = await prisma.notification.update({
             where: { id: Number(id) },
-            data: { isRead: true },
+            data: {
+                isRead: true,
+                updatedAt: now(),   // ✅ explicit updatedAt
+            },
         });
 
         return res.status(200).json({
@@ -92,7 +98,10 @@ const markAllAsRead = async (req, res) => {
     try {
         await prisma.notification.updateMany({
             where: { userId: req.user.id, isRead: false },
-            data: { isRead: true },
+            data: {
+                isRead: true,
+                updatedAt: now(),   // ✅ explicit updatedAt
+            },
         });
 
         return res.status(200).json({

@@ -1,5 +1,8 @@
 const prisma = require('../../lib/prisma');
 
+// Helper for current timestamp
+const now = () => new Date();
+
 /**
  * Log a security action for an outlet
  * @param {Object} req - Express request object (contains req.user)
@@ -21,6 +24,7 @@ const logAction = async (req, action, details, targetId = null, targetType = nul
                 details: details,
                 target_id: targetId ? parseInt(targetId) : null,
                 target_type: targetType,
+                created_at: now()   // ✅ explicit created_at
             }
         });
     } catch (error) {

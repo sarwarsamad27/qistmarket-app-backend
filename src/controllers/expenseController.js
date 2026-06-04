@@ -2,10 +2,13 @@ const prisma = require('../../lib/prisma');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { logAction } = require('../utils/auditLogger');
 
+// Helper for current timestamp
+const now = () => new Date();
+
 // Helper to generate sequential Voucher Number: EV-YYYY-XXXX
 const generateVoucherNumber = async () => {
-    const now = new Date();
-    const year = now.getFullYear();
+    const nowDate = new Date();
+    const year = nowDate.getFullYear();
     const prefix = `EV-${year}-`;
 
     const lastVoucher = await prisma.expenseVoucher.findFirst({
@@ -51,29 +54,33 @@ const createExpenseVoucher = async (req, res) => {
     try {
         const voucher_number = await generateVoucherNumber();
         const total_amount = items.reduce((sum, item) => sum + parseFloat(item.amount), 0);
+        const currentDate = date ? new Date(date) : now();
 
         const result = await prisma.$transaction(async (tx) => {
-            // 1. Create the Voucher Header
+            // 1. Create the Voucher Header with explicit timestamps
             const voucher = await tx.expenseVoucher.create({
                 data: {
                     outlet_id: parseInt(outlet_id),
                     voucher_number,
                     total_amount,
                     payment_method: payment_method || "Cash",
-                    date: date ? new Date(date) : new Date(),
+                    date: currentDate,
                     notes,
+                    created_at: now(),   // ✅ explicit created_at
+                    updated_at: now(),   // ✅ explicit updated_at
                     items: {
                         create: items.map(item => ({
                             category: item.category || "General",
                             amount: parseFloat(item.amount),
                             description: item.description
+                            // ExpenseItem has no timestamp fields
                         }))
                     }
                 },
                 include: { items: true }
             });
 
-            // 2. Update Cash Register
+            // 2. Update Cash Register (assuming updateCashRegister handles its own timestamps)
             await updateCashRegister(tx, parseInt(outlet_id), 'expenses', total_amount, 'add');
 
             return voucher;
@@ -132,9 +139,9 @@ const getExpenseSummary = async (req, res) => {
     const { outlet_id } = req.user;
     if (!outlet_id) return res.status(403).json({ success: false, message: 'Not an outlet user.' });
 
-    const now = new Date();
-    const startOfToday = new Date(now.setHours(0,0,0,0));
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const nowDate = new Date();
+    const startOfToday = new Date(nowDate.setHours(0,0,0,0));
+    const startOfMonth = new Date(nowDate.getFullYear(), nowDate.getMonth(), 1);
 
     try {
         const [todayExpenses, monthExpenses, categorySummary] = await Promise.all([

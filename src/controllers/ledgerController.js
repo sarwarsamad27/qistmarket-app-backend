@@ -10,6 +10,9 @@ const logoDataURI = '';
 
 const LEDGER_TOKEN_SECRET = process.env.LEDGER_TOKEN_SECRET;
 
+// Helper for current timestamp
+const now = () => new Date();
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 const formatPKR = (amount) =>
@@ -623,23 +626,24 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
             <td>
               <div style="font-weight:700;">${rowLabel}${isNext ? ' <span style="color:#3b82f6; font-size: 0.6rem; vertical-align: middle;">⬅ Next</span>' : ''}</div>
               ${row.arrears ? `<div style="color: #ef4444; font-size: 0.65rem; font-weight: 500;">Arrears: ${formatPKR(row.arrears)}</div>` : ''}
+             </div>
             </td>
-            <td>${formatDate(row.due_date)}</td>
-            <td style="font-weight: 700;">${formatPKR(row.dueAmount)}</td>
+            <td>${formatDate(row.due_date)}</div>
+            <td style="font-weight: 700;">${formatPKR(row.dueAmount)}</div>
             <td>
               <div style="color: #16a34a; font-size: 0.75rem;">Paid: ${paidText}</div>
               <div style="color: #ef4444; font-size: 0.75rem;">Rem: ${remainingText}</div>
-            </td>
-            <td>${statusBadge(row.status)}</td>
-            <td style="font-size: 0.75rem; color: #64748b;">${row.paid_at ? formatDate(row.paid_at) : '—'}</td>
-           </tr>`;
+             </div>
+            <td>${statusBadge(row.status)}</div>
+            <td style="font-size: 0.75rem; color: #64748b;">${row.paid_at ? formatDate(row.paid_at) : '—'}</div>
+            </tr>`;
   }).join('')}
       </tbody>
       <tfoot>
         <tr>
-          <td colspan="3"><strong>Grand Total (Advance + Installments)</strong></td>
-          <td><strong>${formatPKR(totalAmount)}</strong></td>
-          <td colspan="2"><strong>Remaining: ${formatPKR(remainingAmount)}</strong></td>
+          <td colspan="3"><strong>Grand Total (Advance + Installments)</strong></div>
+          <td><strong>${formatPKR(totalAmount)}</strong></div>
+          <td colspan="2"><strong>Remaining: ${formatPKR(remainingAmount)}</strong></div>
         </tr>
       </tfoot>
     </table>
@@ -810,7 +814,7 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
 
     // Update current row
     rows[rowIndex].paid_amount = totalPaid;
-    rows[rowIndex].paid_at = new Date();
+    rows[rowIndex].paid_at = now();
     rows[rowIndex].payment_method = payment_method;
     rows[rowIndex].feedback = feedback;
 
@@ -822,13 +826,16 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
       rows[rowIndex].status = 'pending';
     }
 
-    // Save Ledger
+    // Save Ledger with explicit updated_at
     await prisma.installmentLedger.update({
       where: { id: ledger.id },
-      data: { ledger_rows: rows }
+      data: {
+        ledger_rows: rows,
+        updated_at: now()   // ✅ explicit updated_at
+      }
     });
 
-    // Create OrderPayment record
+    // Create OrderPayment record with explicit timestamps
     await prisma.orderPayment.create({
       data: {
         order_id: order.id,
@@ -836,7 +843,9 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
         monthNumber: parseInt(month_number),
         amount: parseFloat(payingNow),
         paymentMethod: payment_method,
-        collectedBy: req.user.id
+        collectedBy_id: req.user.id,
+        created_at: now(),   // ✅ explicit created_at
+        paidAt: now()        // ✅ explicit paidAt
       }
     });
 

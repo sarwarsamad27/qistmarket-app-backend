@@ -1,4 +1,3 @@
-// index.js / server.js
 process.env.TZ = 'Asia/Karachi';
 const prisma = require('./lib/prisma');
 console.log('Date test:', new Date());
@@ -86,7 +85,10 @@ io.on('connection', (socket) => {
       // Persist in DB
       await prisma.user.update({
         where: { id: officerId },
-        data: { current_active_verification_id: verificationId },
+        data: { 
+          current_active_verification_id: verificationId,
+          updated_at: new Date(),
+        },
       });
       const verification = await prisma.verification.findUnique({
         where: { id: verificationId },
@@ -113,7 +115,10 @@ io.on('connection', (socket) => {
       // Persist in DB
       await prisma.user.update({
         where: { id: officerId },
-        data: { current_active_verification_id: null },
+        data: { 
+          current_active_verification_id: null,
+          updated_at: new Date(),
+        },
       });
       io.to('admins').emit('officer_current_verification_update', {
         officerId,
@@ -190,7 +195,11 @@ io.on('connection', (socket) => {
       try {
         await prisma.user.update({
           where: { id: officerId },
-          data: { is_online: true, last_online_at: new Date() },
+          data: { 
+            is_online: true, 
+            last_online_at: new Date(),
+            updated_at: new Date(), 
+          },
         });
 
         let session = await prisma.officerSession.findFirst({
@@ -199,7 +208,11 @@ io.on('connection', (socket) => {
 
         if (!session) {
           session = await prisma.officerSession.create({
-            data: { officer_id: officerId, start_time: new Date() },
+            data: { 
+              officer_id: officerId, 
+              start_time: new Date(),
+              created_at: new Date(), 
+            },
           });
         }
 
@@ -284,6 +297,7 @@ io.on('connection', (socket) => {
           last_known_longitude: longitude,
           last_online_at: new Date(),
           is_online: true,
+          updated_at: new Date(),
         },
       });
 
@@ -386,7 +400,10 @@ io.on('connection', (socket) => {
       // Mark user offline
       await prisma.user.update({
         where: { id: officerId },
-        data: { is_online: false, last_online_at: new Date() },
+        data: { is_online: false, 
+          last_online_at: new Date(),
+          updated_at: new Date(),
+        },
       });
 
       io.to('admins').emit('officer_status_update', {

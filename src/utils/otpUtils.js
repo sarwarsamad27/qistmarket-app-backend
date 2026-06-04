@@ -1,6 +1,9 @@
 const crypto = require('crypto');
 const prisma = require('../../lib/prisma');
 
+// Helper for current timestamp
+const now = () => new Date();
+
 // Generate 5-digit OTP
 const generateOTP = () => {
   return crypto.randomInt(10000, 99999).toString();
@@ -14,7 +17,7 @@ const saveOTP = async (identifier, purpose = 'login') => {
       where: {
         phone: identifier,
         isUsed: false,
-        expiresAt: { lt: new Date() }
+        expiresAt: { lt: now() }
       }
     });
 
@@ -26,7 +29,9 @@ const saveOTP = async (identifier, purpose = 'login') => {
         phone: identifier, // storing email in phone field (we'll rename later)
         otp,
         purpose,
-        expiresAt
+        expiresAt,
+        createdAt: now(),   // ✅ explicit
+        updatedAt: now()    // ✅ explicit
       }
     });
 
@@ -46,7 +51,7 @@ const verifyOTP = async (identifier, otp, purpose = 'login') => {
         otp,
         purpose,
         isUsed: false,
-        expiresAt: { gt: new Date() }
+        expiresAt: { gt: now() }
       }
     });
 
@@ -57,7 +62,10 @@ const verifyOTP = async (identifier, otp, purpose = 'login') => {
     // Mark OTP as used
     await prisma.otp.update({
       where: { id: otpRecord.id },
-      data: { isUsed: true }
+      data: {
+        isUsed: true,
+        updatedAt: now()   // ✅ explicit
+      }
     });
 
     return { valid: true, message: 'OTP verified successfully' };
@@ -72,7 +80,7 @@ const cleanupExpiredOTPs = async () => {
   try {
     const result = await prisma.otp.deleteMany({
       where: {
-        expiresAt: { lt: new Date() }
+        expiresAt: { lt: now() }
       }
     });
     console.log(`Cleaned up ${result.count} expired OTPs`);

@@ -2,6 +2,9 @@ const prisma = require('../../lib/prisma');
 const { sendOrderStatusNotification } = require('../services/watiService');
 const { updateCsrRanking } = require('../services/rankingService');
 
+// Helper for current timestamp
+const now = () => new Date();
+
 /**
  * Logs a status change for an order and sends a WhatsApp notification via Wati.
  * 
@@ -54,7 +57,7 @@ async function logOrderStatusChange(order_id, old_status, new_status, user, rema
         user_id: user?.id ? parseInt(user.id) : null,
         role_name: user?.role || user?.role_name || null,
         remarks: finalRemarks,
-        created_at: new Date(),
+        created_at: now(),   // ✅ explicit timestamp (previously new Date())
       }
     });
 

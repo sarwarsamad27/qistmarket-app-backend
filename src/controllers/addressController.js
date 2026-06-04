@@ -1,5 +1,10 @@
 const prisma = require('../../lib/prisma');
 
+// Helper functions for timestamps
+function now() {
+    return new Date();
+}
+
 // City Operations
 const getCities = async (req, res) => {
     try {
@@ -22,8 +27,12 @@ const createCity = async (req, res) => {
     const { name, status } = req.body;
     if (!name) return res.status(400).json({ success: false, error: 'Name is required' });
     try {
-        const data = { name };
-        if (status) data.status = status;
+        const data = {
+            name,
+            status: status || 'active',
+            created_at: now(),
+            updated_at: now()
+        };
 
         const city = await prisma.city.create({ data });
         return res.json({ success: true, data: city });
@@ -39,7 +48,10 @@ const updateCity = async (req, res) => {
     const { name, status } = req.body;
     if (!name) return res.status(400).json({ success: false, error: 'Name is required' });
     try {
-        const data = { name };
+        const data = {
+            name,
+            updated_at: now()
+        };
         if (status) data.status = status;
 
         const city = await prisma.city.update({
@@ -78,8 +90,13 @@ const createZone = async (req, res) => {
     const { name, city_id, status } = req.body;
     if (!name || !city_id) return res.status(400).json({ success: false, error: 'Name and city_id are required' });
     try {
-        const data = { name, city_id: parseInt(city_id) };
-        if (status) data.status = status;
+        const data = {
+            name,
+            city_id: parseInt(city_id),
+            status: status || 'active',
+            created_at: now(),
+            updated_at: now()
+        };
 
         const zone = await prisma.zone.create({ data });
         return res.json({ success: true, data: zone });
@@ -94,7 +111,11 @@ const updateZone = async (req, res) => {
     const { name, city_id, status } = req.body;
     if (!name || !city_id) return res.status(400).json({ success: false, error: 'Name and city_id are required' });
     try {
-        const data = { name, city_id: parseInt(city_id) };
+        const data = {
+            name,
+            city_id: parseInt(city_id),
+            updated_at: now()
+        };
         if (status) data.status = status;
 
         const zone = await prisma.zone.update({
@@ -132,8 +153,13 @@ const createArea = async (req, res) => {
     const { name, zone_id, status } = req.body;
     if (!name || !zone_id) return res.status(400).json({ success: false, error: 'Name and zone_id are required' });
     try {
-        const data = { name, zone_id: parseInt(zone_id) };
-        if (status) data.status = status;
+        const data = {
+            name,
+            zone_id: parseInt(zone_id),
+            status: status || 'active',
+            created_at: now(),
+            updated_at: now()
+        };
 
         const area = await prisma.area.create({ data });
         return res.json({ success: true, data: area });
@@ -148,7 +174,11 @@ const updateArea = async (req, res) => {
     const { name, zone_id, status } = req.body;
     if (!name || !zone_id) return res.status(400).json({ success: false, error: 'Name and zone_id are required' });
     try {
-        const data = { name, zone_id: parseInt(zone_id) };
+        const data = {
+            name,
+            zone_id: parseInt(zone_id),
+            updated_at: now()
+        };
         if (status) data.status = status;
 
         const area = await prisma.area.update({
@@ -189,7 +219,7 @@ const getAddressHierarchy = async (req, res) => {
     }
 };
 
-// Delete Operations (Optional but helpful)
+// Delete Operations
 const deleteCity = async (req, res) => {
     const { id } = req.params;
     try {
@@ -223,6 +253,7 @@ const deleteArea = async (req, res) => {
     }
 };
 
+// Bulk Upload with explicit timestamps
 const bulkUploadAddresses = async (req, res) => {
     const { data } = req.body; // Expecting array of { city, zone, area }
     if (!data || !Array.isArray(data)) {
@@ -244,10 +275,17 @@ const bulkUploadAddresses = async (req, res) => {
 
             totalRows++;
 
-            // 1. Find or create city
+            // 1. Find or create city (with explicit timestamps)
             let city = await prisma.city.findUnique({ where: { name: cityName.trim() } });
             if (!city) {
-                city = await prisma.city.create({ data: { name: cityName.trim() } });
+                city = await prisma.city.create({
+                    data: {
+                        name: cityName.trim(),
+                        status: 'active',
+                        created_at: now(),
+                        updated_at: now()
+                    }
+                });
             }
 
             // 2. Find or create zone
@@ -256,7 +294,13 @@ const bulkUploadAddresses = async (req, res) => {
             });
             if (!zone) {
                 zone = await prisma.zone.create({
-                    data: { name: zoneName.trim(), city_id: city.id }
+                    data: {
+                        name: zoneName.trim(),
+                        city_id: city.id,
+                        status: 'active',
+                        created_at: now(),
+                        updated_at: now()
+                    }
                 });
             }
 
@@ -266,7 +310,13 @@ const bulkUploadAddresses = async (req, res) => {
             });
             if (!existingArea) {
                 await prisma.area.create({
-                    data: { name: areaName.trim(), zone_id: zone.id }
+                    data: {
+                        name: areaName.trim(),
+                        zone_id: zone.id,
+                        status: 'active',
+                        created_at: now(),
+                        updated_at: now()
+                    }
                 });
                 createdCount++;
             } else {

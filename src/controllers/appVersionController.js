@@ -1,17 +1,13 @@
 const prisma = require('../../lib/prisma');
 
+// Helper for current timestamp
+const now = () => new Date();
+
 const getLatestVersion = async (req, res) => {
   try {
-    // Get the latest version from database
     const latestVersion = await prisma.appVersion.findFirst({
-      orderBy: {
-        created_at: 'desc'
-      },
-      select: {
-        version: true,
-        force_update: true,
-        message: true
-      }
+      orderBy: { created_at: 'desc' },
+      select: { version: true, force_update: true, message: true }
     });
 
     if (!latestVersion) {
@@ -27,7 +23,6 @@ const getLatestVersion = async (req, res) => {
       force_update: latestVersion.force_update,
       message: latestVersion.message || "Naya update available hai. Please update karein."
     });
-
   } catch (error) {
     console.error('Error fetching latest version:', error);
     return res.status(500).json({
@@ -42,7 +37,6 @@ const updateAppVersion = async (req, res) => {
   try {
     const { version, force_update, message } = req.body;
 
-    // Validate required fields
     if (!version) {
       return res.status(400).json({
         success: false,
@@ -50,30 +44,31 @@ const updateAppVersion = async (req, res) => {
       });
     }
 
-    // Check if version exists, if not create new one
+    // Check if any version record exists
     let appVersion = await prisma.appVersion.findFirst({
-      orderBy: {
-        created_at: 'desc'
-      }
+      orderBy: { created_at: 'desc' }
     });
 
     if (appVersion) {
-      // Update existing version
+      // Update existing record – only updated_at needs to be set
       appVersion = await prisma.appVersion.update({
         where: { id: appVersion.id },
         data: {
           version: version,
           force_update: force_update !== undefined ? force_update : appVersion.force_update,
-          message: message !== undefined ? message : appVersion.message
+          message: message !== undefined ? message : appVersion.message,
+          updated_at: now()   // ✅ explicit updated_at
         }
       });
     } else {
-      // Create new if no version exists
+      // Create first record – set both timestamps explicitly
       appVersion = await prisma.appVersion.create({
         data: {
           version: version,
           force_update: force_update || false,
-          message: message || null
+          message: message || null,
+          created_at: now(),   // ✅ explicit created_at
+          updated_at: now()    // ✅ explicit updated_at
         }
       });
     }
@@ -87,7 +82,6 @@ const updateAppVersion = async (req, res) => {
         message: appVersion.message
       }
     });
-
   } catch (error) {
     console.error('Error updating app version:', error);
     return res.status(500).json({

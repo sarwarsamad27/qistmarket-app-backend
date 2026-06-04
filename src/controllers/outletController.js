@@ -8,6 +8,7 @@ const { sendOTP, sendInstallmentPaymentReceipt, sendPartialInstallmentPaymentRec
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
 
+const now = () => new Date();
 
 const createOutlet = async (req, res) => {
     const { code, name, address } = req.body;
@@ -23,7 +24,13 @@ const createOutlet = async (req, res) => {
         }
 
         const outlet = await prisma.outlet.create({
-            data: { code, name, address }
+            data: {
+                code,
+                name,
+                address,
+                created_at: now(),   // ✅ explicit created_at
+                updated_at: now()    // ✅ explicit updated_at
+            }
         });
 
         res.status(201).json({ success: true, outlet });
@@ -56,7 +63,8 @@ const updateOutlet = async (req, res) => {
                 ...(code && { code }),
                 ...(name && { name }),
                 ...(address !== undefined && { address }),
-                ...(status && { status })
+                ...(status && { status }),
+                updated_at: now()   // ✅ explicit updated_at
             }
         });
         res.json({ success: true, outlet: updated });
@@ -475,13 +483,13 @@ const verifyCashSubmissionOTP = async (req, res) => {
 
         // Process each partial submission
         for (const history of histories) {
-            // Mark history as paid
+            // Mark history as paid (CashSubmissionHistory has no updated_at field)
             await prisma.cashSubmissionHistory.update({
                 where: { id: history.id },
                 data: { status: 'paid', otp: null }
             });
 
-            // Update parent CashInHand
+            // Update parent CashInHand with updated_at
             let newSubmitted = (history.cash_in_hand.submitted_amount || 0) + history.amount_submitted;
             const isFullyPaid = newSubmitted >= history.cash_in_hand.amount;
 
@@ -490,7 +498,8 @@ const verifyCashSubmissionOTP = async (req, res) => {
                 data: {
                     submitted_amount: newSubmitted,
                     status: isFullyPaid ? 'paid' : 'pending',
-                    otp: null // Clear just in case
+                    otp: null,
+                    updated_at: now()   // ✅ explicit updated_at
                 }
             });
         }
@@ -688,8 +697,8 @@ const verifyReturnExchangeOtp = async (req, res) => {
 
         // Step 2: Time calculation for Used Stock logic (48 hours)
         const deliveryTime = record.order.delivery?.end_time || record.order.delivery?.updated_at || record.order.updated_at;
-        const now = new Date();
-        const hoursSinceDelivery = (now.getTime() - new Date(deliveryTime).getTime()) / (1000 * 60 * 60);
+        const nowDate = now();
+        const hoursSinceDelivery = (nowDate.getTime() - new Date(deliveryTime).getTime()) / (1000 * 60 * 60);
 
         // If type is Return and > 48h, mark as Used
         const isUsed = record.type === 'Return' && hoursSinceDelivery > 48;
@@ -699,7 +708,7 @@ const verifyReturnExchangeOtp = async (req, res) => {
             where: { id: record.id },
             data: {
                 status: 'verified',
-                verified_at: now,
+                verified_at: nowDate,   // ✅ explicit verified_at
                 is_used: isUsed
             }
         });
@@ -710,7 +719,6 @@ const verifyReturnExchangeOtp = async (req, res) => {
         }
 
         // Step 5: Handle CashInHand Cancellation for Delivery Officer
-        // If there's a pending cash collection for this order, cancel it since the product is returned.
         const pendingCash = await prisma.cashInHand.findFirst({
             where: {
                 order_id: record.order_id,
@@ -721,7 +729,10 @@ const verifyReturnExchangeOtp = async (req, res) => {
         if (pendingCash) {
             await prisma.cashInHand.update({
                 where: { id: pendingCash.id },
-                data: { status: 'cancelled' } // Mark as cancelled instead of paid
+                data: {
+                    status: 'cancelled',
+                    updated_at: nowDate   // ✅ explicit updated_at
+                }
             });
         }
 
@@ -729,32 +740,31 @@ const verifyReturnExchangeOtp = async (req, res) => {
         const isExchange = record.type === 'Exchange';
 
         if (isExchange) {
-            // For Exchange: Reset the order so it can be delivered again
             await prisma.order.update({
                 where: { id: record.order_id },
                 data: {
                     status: 'approved',
                     imei_serial: null,
-                    is_delivered: false
+                    is_delivered: false,
+                    updated_at: nowDate   // ✅ explicit updated_at
                 }
             });
 
             await logOrderStatusChange(record.order_id, record.order.status || 'delivered', 'approved', req.user);
 
-            // Delete the delivery record (remove delivery history for this attempt)
             await prisma.delivery.deleteMany({
                 where: { order_id: record.order_id }
             });
 
             console.log(`Exchange completed: Order ${record.order.order_ref} reset to approved for redelivery.`);
         } else {
-            // Simple Return
             await prisma.order.update({
                 where: { id: record.order_id },
                 data: {
                     status: 'Returned',
                     imei_serial: null,
-                    is_delivered: false
+                    is_delivered: false,
+                    updated_at: nowDate   // ✅ explicit updated_at
                 }
             });
 
@@ -770,10 +780,13 @@ const verifyReturnExchangeOtp = async (req, res) => {
             if (inventory) {
                 await prisma.outletInventory.update({
                     where: { id: inventory.id },
-                    data: { status: isUsed ? 'Used Stock' : 'In Stock' }
+                    data: {
+                        status: isUsed ? 'Used Stock' : 'In Stock',
+                        updated_at: nowDate   // ✅ explicit updated_at
+                    }
                 });
 
-                // Step 8: Log the stock transfer
+                // Step 8: Create stock transfer record with explicit timestamps
                 await prisma.stockTransfer.create({
                     data: {
                         inventory_id: inventory.id,
@@ -783,6 +796,8 @@ const verifyReturnExchangeOtp = async (req, res) => {
                         to_id: parseInt(outlet_id),
                         status: 'completed',
                         quantity_transferred: 1,
+                        created_at: nowDate,   // ✅ explicit created_at
+                        updated_at: nowDate    // ✅ explicit updated_at
                     }
                 });
             }
@@ -807,7 +822,7 @@ const initiateDirectReturn = async (req, res) => {
     }
 
     try {
-        // 1. Fetch order, delivery, verification, and the official CashInHand receipt
+        // ... (fetch order logic unchanged) ...
         const order = await prisma.order.findUnique({
             where: { id: parseInt(order_id) },
             include: {
@@ -830,7 +845,7 @@ const initiateDirectReturn = async (req, res) => {
             return res.status(403).json({ success: false, error: 'This order does not belong to your outlet.' });
         }
 
-        // 2. Extract delivery-specific data prioritizing the official CashInHand record
+        // Extract data (unchanged)
         const cashRecord = order.cash_in_hand?.[0];
         const deliveryPlan = order.delivery.selected_plan ? (typeof order.delivery.selected_plan === 'string' ? JSON.parse(order.delivery.selected_plan) : order.delivery.selected_plan) : null;
 
@@ -838,7 +853,6 @@ const initiateDirectReturn = async (req, res) => {
         const productName = cashRecord?.product_name || deliveryPlan?.productName || order.product_name;
         const imei = cashRecord?.imei_serial || order.delivery.product_imei;
 
-        // Split color/variant from CashInHand snapshot first
         let color = null;
         let variant = null;
         if (cashRecord?.color_variant) {
@@ -850,10 +864,9 @@ const initiateDirectReturn = async (req, res) => {
             variant = deliveryPlan?.variant || deliveryPlan?.productVariant || null;
         }
 
-        // 3. Generate OTP for customer verification
         const otp = Math.floor(1000 + Math.random() * 9000).toString(); // 4-digit OTP
 
-        // 4. Create PENDING record (Storing extra specs in selected_plan JSON to avoid schema conflicts)
+        // Create PENDING record with explicit created_at
         const returnRecord = await prisma.returnExchange.create({
             data: {
                 order_id: parseInt(order_id),
@@ -862,7 +875,6 @@ const initiateDirectReturn = async (req, res) => {
                 status: 'pending',
                 otp: otp,
                 product_name: productName,
-                // We store these in selected_plan to ensure data is captured without needing immediate schema columns
                 selected_plan: {
                     ...deliveryPlan,
                     delivered_color: color,
@@ -872,13 +884,13 @@ const initiateDirectReturn = async (req, res) => {
                 imei_returned: imei,
                 is_cash_refund: !!is_cash_refund,
                 refund_amount: parseFloat(refund_amount) || 0,
-                initiated_by: "Outlet"
+                initiated_by: "Outlet",
+                created_at: now()   // ✅ explicit created_at
             }
         });
 
-        // 5. Send OTP to Customer (Purchaser) via WhatsApp
+        // Send OTP (unchanged)
         const customerPhone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
-
         if (customerPhone) {
             try {
                 await sendOTP(customerPhone, otp);
@@ -888,7 +900,7 @@ const initiateDirectReturn = async (req, res) => {
             }
         }
 
-        // 6. Socket Notification for Real-time Dashboard Update
+        // Socket notification (unchanged)
         const io = req.app.get('io');
         if (io) {
             io.to(`outlet_${outlet_id}`).emit('return_exchange_requested', {
@@ -913,7 +925,6 @@ const initiateDirectReturn = async (req, res) => {
             message: `OTP generated and sent to customer's WhatsApp. Please verify to complete the Sales Return.`,
             data: { record_id: returnRecord.id }
         });
-
     } catch (error) {
         console.error('initiateDirectReturn error:', error);
         return res.status(500).json({ success: false, error: 'Server error' });
@@ -1140,7 +1151,7 @@ const getOutletInstallments = async (req, res) => {
                         purchaser: true,
                         grantors: true,
                         documents: {
-                            where: { label: { in: ['Purchaser Profile', 'Grantor 1 Profile', 'Grantor 2 Profile', 'Purchaser Face Photo'] } },
+                            where: { label: { in: ['photo - Purchaser', 'photo - Grantor 1', 'photo - Grantor 2'] } },
                             orderBy: { uploaded_at: 'desc' }
                         }
                     },
@@ -1254,11 +1265,11 @@ const getOutletInstallments = async (req, res) => {
                 outlet_code: order.outlet?.code || 'N/A',
                 purchaser: {
                     ...purchaser,
-                    profile_photo: documents.find(d => d.label === 'Purchaser Profile' || d.label === 'Purchaser Face Photo')?.file_url || null
+                    profile_photo: documents.find(d => d.label === 'photo - Purchaser')?.file_url || null
                 },
                 grantors: grantors.map(g => ({
                     ...g,
-                    profile_photo: documents.find(d => d.label === `Grantor ${g.grantor_number} Profile`)?.file_url || null
+                    profile_photo: documents.find(d => d.label === `photo - Grantor ${g.grantor_number}`)?.file_url || null
                 })),
                 ledgerSummaries: {
                     advanceAmount,
@@ -1408,7 +1419,7 @@ const verifyInstallmentPayment = async (req, res) => {
         if (rowIndex === -1) return res.status(404).json({ success: false, message: 'Installment month not found in ledger' });
         if (rows[rowIndex].status === 'paid') return res.status(400).json({ success: false, message: 'Installment already paid' });
 
-        // Update row
+        // Update row details
         const dueAmount = parseFloat(rows[rowIndex].amount || rows[rowIndex].dueAmount || 0);
         const existingPaid = parseFloat(rows[rowIndex].paid_amount || 0);
         const payingNow = amount !== undefined ? parseFloat(amount) : (dueAmount - existingPaid);
@@ -1418,7 +1429,6 @@ const verifyInstallmentPayment = async (req, res) => {
             return res.status(400).json({ success: false, message: `Payment exceeds due amount. Remaining is ${dueAmount - existingPaid}` });
         }
 
-        // Maintain strict payment history of dates and amounts for partial/full payment tracking
         if (!rows[rowIndex].payment_history) {
             rows[rowIndex].payment_history = [];
             if (existingPaid > 0) {
@@ -1431,12 +1441,12 @@ const verifyInstallmentPayment = async (req, res) => {
         }
         rows[rowIndex].payment_history.push({
             amount: payingNow,
-            date: new Date(),
+            date: now(),
             method: payment_method
         });
 
         rows[rowIndex].paid_amount = totalPaid;
-        rows[rowIndex].paid_at = new Date();
+        rows[rowIndex].paid_at = now();
         rows[rowIndex].payment_method = payment_method;
         rows[rowIndex].feedback = feedback;
 
@@ -1448,10 +1458,13 @@ const verifyInstallmentPayment = async (req, res) => {
             rows[rowIndex].status = 'pending';
         }
 
-        // Save Ledger
+        // Save Ledger with updated_at
         await prisma.installmentLedger.update({
             where: { id: ledger.id },
-            data: { ledger_rows: rows }
+            data: {
+                ledger_rows: rows,
+                updated_at: now()   // ✅ explicit updated_at
+            }
         });
 
         // Update Cash Register (Only for Cash payments)
@@ -1460,21 +1473,18 @@ const verifyInstallmentPayment = async (req, res) => {
             await updateCashRegister(null, outlet_id, 'installments_received', payingNow, 'add');
         }
 
-        // Fetch real product name from inventory using IMEI
+        // Fetch real product name from inventory using IMEI (unchanged)
         const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial || null;
         let finalProductName = order.product_name;
-
         if (imeiSerial) {
             const invInfo = await prisma.outletInventory.findFirst({
                 where: { imei_serial: imeiSerial },
                 select: { product_name: true }
             });
-            if (invInfo?.product_name) {
-                finalProductName = invInfo.product_name;
-            }
+            if (invInfo?.product_name) finalProductName = invInfo.product_name;
         }
 
-        // Send Wati Receipt
+        // Send Wati Receipt (unchanged)
         const customerName = order.verification?.purchaser?.name || order.customer_name;
         if (totalPaid >= dueAmount) {
             sendInstallmentPaymentReceipt(phone, {
@@ -1495,7 +1505,7 @@ const verifyInstallmentPayment = async (req, res) => {
             }).catch(err => console.error('Wati Partial Receipt Error:', err));
         }
 
-        // Send Next Month Reminder if exists
+        // Send Next Month Reminder if exists (unchanged)
         const nextRow = rows[rowIndex + 1];
         if (nextRow) {
             sendNextInstallmentReminder(phone, {
@@ -2129,7 +2139,6 @@ const updateInstallmentNote = async (req, res) => {
     }
 
     try {
-        // Fetch order with installment ledger
         const order = await prisma.order.findUnique({
             where: { id: parseInt(id) },
             include: {
@@ -2151,19 +2160,19 @@ const updateInstallmentNote = async (req, res) => {
             rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : JSON.parse(ledger.ledger_rows);
         }
 
-        // Find the monthly installment row
         const targetRow = rows.find(r => r.month === parseInt(month_number));
         if (!targetRow) {
             return res.status(404).json({ success: false, message: `Installment for month ${month_number} not found` });
         }
 
-        // Update note specifically for this installment month
         targetRow.note = note;
 
-        // Save ledger rows back
         await prisma.installmentLedger.update({
             where: { id: ledger.id },
-            data: { ledger_rows: rows }
+            data: {
+                ledger_rows: rows,
+                updated_at: now()   // ✅ explicit updated_at
+            }
         });
 
         res.json({ success: true, message: 'Installment note updated successfully' });
