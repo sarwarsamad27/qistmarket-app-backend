@@ -127,7 +127,7 @@ model Order {
   house_no                 String?
   street                   String?
   zone                     String?
-  cancelled_at             DateTime?
+  cancelled_at             DateTime?             @default(now())
   cancelled_reason         String?               @db.Text
   recovery_officer_id      Int?
   outlet_id                Int?
