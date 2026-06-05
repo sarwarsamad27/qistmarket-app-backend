@@ -12,6 +12,7 @@ const {
   updateOfficerProfile,
   getMyOfficerStatus,
   getOfficerDailyStats,
+  getOfficerDashboardStats,
 } = require('../controllers/officerController');
 
 // Backward compatibility - /officers returns verification officers
@@ -31,5 +32,8 @@ router.get('/recovery/:officerId/profile-detail', authenticateJWT, getRecoveryOf
 router.put('/officer/profile', authenticateJWT, updateOfficerProfile);
 router.get('/officer/status', authenticateJWT, getMyOfficerStatus);
 router.get('/officers/:id/stats', authenticateJWT, getOfficerDailyStats);
+
+// Unified Dashboard for all officers
+router.get('/officer/dashboard', authenticateJWT, getOfficerDashboardStats);
 
 module.exports = router;

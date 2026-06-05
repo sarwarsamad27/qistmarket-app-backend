@@ -35,7 +35,8 @@ const {
   getDeliveredProductDetails,
   getDeliveredProductsList,
   updateVerificationMedia,
-  replaceLocationPhoto
+  replaceLocationPhoto,
+  getDashboardStats
 } = require('../controllers/verificationController');
 
 // Get all verifications

@@ -424,7 +424,14 @@ const createOrder = async (req, res) => {
     const userRole = (req.user?.role || '').toLowerCase();
     const isSalesOfficer = userRole === 'sales officer';
 
-    if (!isSalesOfficer && zone && area && currentUser?.outlet_id) {
+    // Self-assignment for field officers creating their own orders
+    if (userRole === 'verification officer') {
+      assignedOfficerId = req.user.id;
+    } else if (userRole === 'delivery agent') {
+      deliveryOfficerId = req.user.id;
+    } else if (userRole === 'recovery officer') {
+      recoveryOfficerId = req.user.id;
+    } else if (!isSalesOfficer && zone && area && currentUser?.outlet_id) {
       const { getOutletSettings } = require('../utils/settingsUtils');
       const settings = await getOutletSettings(currentUser.outlet_id);
 
@@ -481,7 +488,7 @@ const createOrder = async (req, res) => {
         monthly_amount: parseFloat(monthly_amount),
         months: parseInt(months),
         channel: channel.trim(),
-        status: assignedOfficerId ? 'pending' : 'new',
+        status: (assignedOfficerId || deliveryOfficerId || recoveryOfficerId) ? 'pending' : 'new',
         created_at: new Date(),
         updated_at: new Date(),
         created_by_user_id: req.user.id,

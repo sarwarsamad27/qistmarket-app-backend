@@ -13,7 +13,8 @@ const {
     submitInstallment,
     logRecoveryVisit,
     getOrderRecoveryVisits,
-    replaceRecoveryVisitPhoto
+    replaceRecoveryVisitPhoto,
+    getDashboardStats
 } = require('../controllers/recoveryController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 

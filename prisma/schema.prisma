@@ -79,6 +79,9 @@ model User {
   collected_payments             OrderPayment[]            @relation("PaymentCollector")
   status_changes                 OrderStatusHistory[]      @relation("UserOrderStatusChanges")
   csr_rankings                   CsrRanking[]
+  verification_rankings          VerificationRanking[]
+  delivery_rankings              DeliveryRanking[]
+  recovery_rankings              RecoveryRanking[]
   officer_transactions           OfficerTransaction[]      @relation("OfficerTransactions")
 
   @@index([role_id])
@@ -1190,4 +1193,76 @@ model SmartPayPaymentLog {
 
   @@index([consumer_number, transactionId, timestamp])
   @@map("smartpay_payment_logs")
+}
+
+model VerificationRanking {
+  id                Int      @id @default(autoincrement())
+  officer_id        Int
+  period            String   // "today", "week", "month"
+  month             Int?     // 1-12
+  year              Int?
+  unique_customers  Int      @default(0)
+  delivered_customers Int    @default(0)
+  completed_customers Int    @default(0)
+  repeat_customers    Int    @default(0)
+  cancelled_customers Int    @default(0)
+  expired_customers   Int    @default(0)
+  total_sales       Float    @default(0)
+  score             Float    @default(0)
+  rank              Int      @default(0)
+  trend             Int      @default(0) // -1, 0, 1
+  updated_at        DateTime @updatedAt
+
+  user              User     @relation(fields: [officer_id], references: [id])
+
+  @@unique([officer_id, period, month, year])
+  @@map("verification_rankings")
+}
+
+model DeliveryRanking {
+  id                Int      @id @default(autoincrement())
+  officer_id        Int
+  period            String   // "today", "week", "month"
+  month             Int?     // 1-12
+  year              Int?
+  unique_customers  Int      @default(0)
+  delivered_customers Int    @default(0)
+  completed_customers Int    @default(0)
+  repeat_customers    Int    @default(0)
+  cancelled_customers Int    @default(0)
+  expired_customers   Int    @default(0)
+  total_sales       Float    @default(0)
+  score             Float    @default(0)
+  rank              Int      @default(0)
+  trend             Int      @default(0) // -1, 0, 1
+  updated_at        DateTime @updatedAt
+
+  user              User     @relation(fields: [officer_id], references: [id])
+
+  @@unique([officer_id, period, month, year])
+  @@map("delivery_rankings")
+}
+
+model RecoveryRanking {
+  id                Int      @id @default(autoincrement())
+  officer_id        Int
+  period            String   // "today", "week", "month"
+  month             Int?     // 1-12
+  year              Int?
+  unique_customers  Int      @default(0)
+  delivered_customers Int    @default(0)
+  completed_customers Int    @default(0)
+  repeat_customers    Int    @default(0)
+  cancelled_customers Int    @default(0)
+  expired_customers   Int    @default(0)
+  total_sales       Float    @default(0)
+  score             Float    @default(0)
+  rank              Int      @default(0)
+  trend             Int      @default(0) // -1, 0, 1
+  updated_at        DateTime @updatedAt
+
+  user              User     @relation(fields: [officer_id], references: [id])
+
+  @@unique([officer_id, period, month, year])
+  @@map("recovery_rankings")
 }

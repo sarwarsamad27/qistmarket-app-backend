@@ -10,6 +10,7 @@ const {
 const { logAction } = require('../utils/auditLogger');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
 const { createOfficerTransaction } = require('../utils/officerTransactionUtils');
+const { updateRecoveryRanking } = require('../services/recoveryRankingService');
 
 const now = () => new Date();
 
@@ -876,7 +877,205 @@ const replaceRecoveryVisitPhoto = async (req, res) => {
   }
 };
 
+const getRecoveryDashboardStats = async (req, res) => {
+  try {
+    const { filter = 'today', startDate, endDate } = req.query;
+    const userId = req.user?.id;
+
+    // Fetch officer info from DB (for bike_km_range, working_hours)
+    const officerInfo = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { bike_km_range: true, working_hours_start: true, working_hours_end: true }
+    });
+
+    // Trigger async ranking update
+    updateRecoveryRanking(userId, 'today').catch(err => console.error('Auto-ranking update error:', err));
+    updateRecoveryRanking(userId, 'month').catch(err => console.error('Auto-ranking update error:', err));
+
+    const nowDt = new Date();
+    let start, end;
+
+    if (filter === 'today') {
+      start = new Date(nowDt); start.setHours(0, 0, 0, 0);
+      end = new Date(nowDt); end.setHours(23, 59, 59, 999);
+    } else if (filter === 'month') {
+      start = new Date(nowDt.getFullYear(), nowDt.getMonth(), 1, 0, 0, 0, 0);
+      end = new Date(nowDt.getFullYear(), nowDt.getMonth() + 1, 0, 23, 59, 59, 999);
+    } else if (filter === 'custom' && startDate && endDate) {
+      start = new Date(startDate); start.setHours(0, 0, 0, 0);
+      end = new Date(endDate); end.setHours(23, 59, 59, 999);
+    } else {
+      start = new Date(nowDt); start.setHours(0, 0, 0, 0);
+      end = new Date(nowDt); end.setHours(23, 59, 59, 999);
+    }
+
+    const dateFilter = { gte: start, lte: end };
+
+    const baseWhere = {
+      updated_at: dateFilter,
+      recovery_officer_id: userId
+    };
+
+    // Status counts
+    const statusGroups = await prisma.order.groupBy({
+      by: ['status'],
+      where: baseWhere,
+      _count: { id: true },
+    });
+
+    const statusCounts = statusGroups.reduce((acc, item) => {
+      acc[item.status] = item._count.id;
+      return acc;
+    }, {});
+
+    const totalOrders = Object.values(statusCounts).reduce((a, b) => a + b, 0);
+    const newCount = statusCounts['new'] || 0;
+    const pendingCount = statusCounts['pending'] || 0;
+    const inProgressCount = statusCounts['in_progress'] || 0;
+    const cancelledCount = statusCounts['cancelled'] || 0;
+    const completedCount = statusCounts['completed'] || 0;
+    const deliveredCount = statusCounts['delivered'] || 0;
+    const expiredCount = statusCounts['expired'] || 0;
+    const postponedCount = statusCounts['postponed'] || 0;
+    const rejectedCount = statusCounts['rejected'] || 0;
+
+    // Recovery-specific metrics
+    const cashInHandSum = await prisma.cashInHand.aggregate({
+        where: { officer_id: userId, status: 'pending' },
+        _sum: { amount: true, submitted_amount: true }
+    });
+
+    const totalCashInHand = (cashInHandSum._sum.amount || 0) - (cashInHandSum._sum.submitted_amount || 0);
+
+    const collectedAmountSum = await prisma.recoveryVisit.aggregate({
+        where: { officer_id: userId, payment_collected: true, visit_time: dateFilter },
+        _sum: { amount_collected: true }
+    });
+
+    const topVisitDeadlineOrders = await prisma.order.findMany({
+        where: {
+            recovery_officer_id: userId,
+            status: { in: ['pending', 'in_progress', 'delivered'] } // For recovery, delivered orders have installments
+        },
+        orderBy: { updated_at: 'asc' },
+        take: 5
+    });
+
+    // Yesterday for increment
+    const yesterdayStart = new Date(start); yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+    const yesterdayEnd = new Date(end); yesterdayEnd.setDate(yesterdayEnd.getDate() - 1);
+
+    const yesterdayStatusGroups = await prisma.order.groupBy({
+      by: ['status'],
+      where: { ...baseWhere, updated_at: { gte: yesterdayStart, lte: yesterdayEnd } },
+      _count: { id: true },
+    });
+
+    const yesterdayCounts = yesterdayStatusGroups.reduce((acc, item) => {
+      acc[item.status] = item._count.id;
+      return acc;
+    }, {});
+
+    const calcIncrement = (curr, prev) => {
+      if (!prev || prev === 0) return curr > 0 ? 100 : 0;
+      return Math.round(((curr - prev) / prev) * 100);
+    };
+
+    const todayIncrement = {
+      total: calcIncrement(totalOrders, Object.values(yesterdayCounts).reduce((a, b) => a + b, 0)),
+      new: calcIncrement(newCount, yesterdayCounts['new']),
+      pending: calcIncrement(pendingCount, yesterdayCounts['pending']),
+      delivered: calcIncrement(deliveredCount, yesterdayCounts['delivered']),
+      cancelled: calcIncrement(cancelledCount, yesterdayCounts['cancelled']),
+      expired: calcIncrement(expiredCount, yesterdayCounts['expired']),
+      postponed: calcIncrement(postponedCount, yesterdayCounts['postponed']),
+      rejected: calcIncrement(rejectedCount, yesterdayCounts['rejected']),
+    };
+
+    // Rankings
+    const rankingPeriod = filter === 'custom' ? 'month' : filter;
+    
+    const recoveryOfficers = await prisma.user.findMany({
+      where: {
+        role: {
+          name: { contains: 'Recovery' }
+        }
+      },
+      select: { id: true, full_name: true, username: true, image: true, outlet: { select: { name: true } } }
+    });
+
+    const rankings = await prisma.recoveryRanking.findMany({
+      where: {
+        period: rankingPeriod,
+        month: rankingPeriod === 'month' ? nowDt.getMonth() + 1 : 0,
+        year: rankingPeriod === 'month' ? nowDt.getFullYear() : 0,
+      }
+    });
+
+    const rankingMap = rankings.reduce((acc, r) => { acc[r.officer_id] = r; return acc; }, {});
+
+    let officerRanking = recoveryOfficers.map(officer => {
+      const rankRecord = rankingMap[officer.id];
+      const score = rankRecord ? rankRecord.score : 0;
+      let league = 'Bronze';
+      if (score >= 1500) league = 'Gold';
+      else if (score >= 1000) league = 'Silver';
+
+      return {
+        userId: officer.id,
+        name: officer.full_name,
+        username: officer.username,
+        image: officer.image,
+        outletName: officer.outlet?.name || 'Main Outlet',
+        uniqueCustomers: rankRecord ? rankRecord.unique_customers : 0,
+        delivered: rankRecord ? rankRecord.delivered_customers : 0,
+        completed: rankRecord ? rankRecord.completed_customers : 0,
+        cancelled: rankRecord ? rankRecord.cancelled_customers : 0,
+        expired: rankRecord ? rankRecord.expired_customers : 0,
+        totalSales: rankRecord ? rankRecord.total_sales : 0, // This represents collected amount for recovery
+        score: score,
+        trend: rankRecord ? rankRecord.trend : 0,
+        league: league
+      };
+    });
+
+    officerRanking.sort((a, b) => b.score - a.score);
+    officerRanking = officerRanking.map((r, index) => ({ ...r, rank: index + 1 }));
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        filter,
+        dateRange: { start, end },
+        totalOrders,
+        statusCounts: {
+          new: newCount,
+          pending: pendingCount,
+          in_progress: inProgressCount,
+          cancelled: cancelledCount,
+          completed: completedCount,
+          delivered: deliveredCount,
+          expired: expiredCount,
+          postponed: postponedCount,
+          rejected: rejectedCount,
+        },
+        bikeRange: officerInfo?.bike_km_range || 0,
+        workingHours: `${officerInfo?.working_hours_start || '09:00'} - ${officerInfo?.working_hours_end || '18:00'}`,
+        cashInHand: totalCashInHand,
+        collectedAmount: collectedAmountSum._sum.amount_collected || 0,
+        topVisitDeadlineOrders,
+        todayIncrement,
+        officerRanking
+      },
+    });
+  } catch (error) {
+    console.error('getDashboardStats error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 module.exports = {
+  getRecoveryDashboardStats,
   getAllRecoveryOfficers,
   getRecoveryOfficerStats,
   getRecoveryCustomers,

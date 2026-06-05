@@ -20,7 +20,8 @@ const {
   submitCashToOutlet,
   initiateReturnExchange,
   getDeliveryOfficerOTPLogs,
-  replaceDeliveryUpload
+  replaceDeliveryUpload,
+  getDashboardStats
 } = require('../controllers/deliveryController');
 
 // Delivery Officer Analytics

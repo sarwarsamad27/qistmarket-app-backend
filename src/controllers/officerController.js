@@ -1,4 +1,7 @@
 const prisma = require('../../lib/prisma');
+const { getVerificationDashboardStats } = require('./verificationController');
+const { getDeliveryDashboardStats } = require('./deliveryController');
+const { getRecoveryDashboardStats } = require('./recoveryController');
 
 const now = () => new Date();
 
@@ -632,6 +635,39 @@ const getRecoveryOfficerProfileDetail = async (req, res) => {
   }
 };
 
+const getOfficerDashboardStats = async (req, res) => {
+    try {
+        const userId = req.user?.id;
+        if (!userId) {
+            return res.status(401).json({ success: false, message: 'Unauthorized' });
+        }
+
+        const user = await prisma.user.findUnique({
+            where: { id: userId },
+            include: { role: true }
+        });
+
+        if (!user || !user.role) {
+            return res.status(403).json({ success: false, message: 'Role not found' });
+        }
+
+        const roleName = user.role.name;
+
+        if (roleName.includes('Verification Officer')) {
+            return getVerificationDashboardStats(req, res);
+        } else if (roleName.includes('Delivery Agent')) {
+            return getDeliveryDashboardStats(req, res);
+        } else if (roleName.includes('Recovery Officer')) {
+            return getRecoveryDashboardStats(req, res);
+        } else {
+            return res.status(403).json({ success: false, message: 'Dashboard not available for this role' });
+        }
+    } catch (error) {
+        console.error('Unified Dashboard Error:', error);
+        return res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
 module.exports = {
   getAllVerificationOfficers,
   getOfficerProfileDetail,
@@ -642,4 +678,5 @@ module.exports = {
   updateOfficerProfile,
   getMyOfficerStatus,
   getOfficerDailyStats,
+  getOfficerDashboardStats,
 };

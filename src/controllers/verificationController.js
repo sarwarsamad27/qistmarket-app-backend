@@ -5,6 +5,7 @@ const { sendOrderAssignmentNotification } = require('./ordersController');
 const { checkBlacklistStatus } = require('../utils/blacklistUtils');
 const { getNormalizedLedger } = require('../utils/ledgerUtils');
 const { getOrCreateCustomer, updateCsrRanking } = require('../services/rankingService');
+const { updateVerificationRanking } = require('../services/verificationRankingService');
 
 // Helper for current timestamp
 const now = () => new Date();
@@ -2720,7 +2721,243 @@ const replaceLocationPhoto = async (req, res) => {
   }
 };
 
+const getVerificationDashboardStats = async (req, res) => {
+  try {
+    const { filter = 'today', startDate, endDate } = req.query;
+    const userId = req.user?.id;
+
+    // Fetch officer info from DB (for bike_km_range, working_hours)
+    const officerInfo = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { bike_km_range: true, working_hours_start: true, working_hours_end: true }
+    });
+
+    // Trigger async ranking update
+    updateVerificationRanking(userId, 'today').catch(err => console.error('Auto-ranking update error:', err));
+    updateVerificationRanking(userId, 'month').catch(err => console.error('Auto-ranking update error:', err));
+
+    const nowDt = new Date();
+    let start, end;
+
+    if (filter === 'today') {
+      start = new Date(nowDt); start.setHours(0, 0, 0, 0);
+      end = new Date(nowDt); end.setHours(23, 59, 59, 999);
+    } else if (filter === 'month') {
+      start = new Date(nowDt.getFullYear(), nowDt.getMonth(), 1, 0, 0, 0, 0);
+      end = new Date(nowDt.getFullYear(), nowDt.getMonth() + 1, 0, 23, 59, 59, 999);
+    } else if (filter === 'custom' && startDate && endDate) {
+      start = new Date(startDate); start.setHours(0, 0, 0, 0);
+      end = new Date(endDate); end.setHours(23, 59, 59, 999);
+    } else {
+      start = new Date(nowDt); start.setHours(0, 0, 0, 0);
+      end = new Date(nowDt); end.setHours(23, 59, 59, 999);
+    }
+
+    const dateFilter = { gte: start, lte: end };
+
+    const baseWhere = {
+      updated_at: dateFilter,
+      assigned_to_user_id: userId
+    };
+
+    // Status counts
+    const statusGroups = await prisma.order.groupBy({
+      by: ['status'],
+      where: baseWhere,
+      _count: { id: true },
+    });
+
+    const statusCounts = statusGroups.reduce((acc, item) => {
+      acc[item.status] = item._count.id;
+      return acc;
+    }, {});
+
+    const totalOrders = Object.values(statusCounts).reduce((a, b) => a + b, 0);
+    const newCount = statusCounts['new'] || 0;
+    const pendingCount = statusCounts['pending'] || 0;
+    const inProgressCount = statusCounts['in_progress'] || 0;
+    const cancelledCount = statusCounts['cancelled'] || 0;
+    const completedCount = statusCounts['completed'] || 0;
+    const deliveredCount = statusCounts['delivered'] || 0;
+    const expiredCount = statusCounts['expired'] || 0;
+    const approvedCount = statusCounts['approved'] || 0;
+    const rejectedCount = statusCounts['rejected'] || 0;
+
+    // specific metrics
+    const homeLocationRequiredCount = await prisma.verification.count({
+        where: {
+            verification_officer_id: userId,
+            home_location_required: true,
+            home_location_verified: false,
+            updated_at: dateFilter
+        }
+    });
+
+    const topVisitDeadlineOrders = await prisma.order.findMany({
+        where: {
+            assigned_to_user_id: userId,
+            status: { in: ['pending', 'in_progress', 'new'] }
+        },
+        orderBy: { updated_at: 'asc' },
+        take: 5
+    });
+
+    // Yesterday for increment
+    const yesterdayStart = new Date(start); yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+    const yesterdayEnd = new Date(end); yesterdayEnd.setDate(yesterdayEnd.getDate() - 1);
+
+    const yesterdayStatusGroups = await prisma.order.groupBy({
+      by: ['status'],
+      where: { ...baseWhere, updated_at: { gte: yesterdayStart, lte: yesterdayEnd } },
+      _count: { id: true },
+    });
+
+    const yesterdayCounts = yesterdayStatusGroups.reduce((acc, item) => {
+      acc[item.status] = item._count.id;
+      return acc;
+    }, {});
+
+    const calcIncrement = (curr, prev) => {
+      if (!prev || prev === 0) return curr > 0 ? 100 : 0;
+      return Math.round(((curr - prev) / prev) * 100);
+    };
+
+    const todayIncrement = {
+      total: calcIncrement(totalOrders, Object.values(yesterdayCounts).reduce((a, b) => a + b, 0)),
+      new: calcIncrement(newCount, yesterdayCounts['new']),
+      pending: calcIncrement(pendingCount, yesterdayCounts['pending']),
+      delivered: calcIncrement(deliveredCount, yesterdayCounts['delivered']),
+      approved: calcIncrement(approvedCount, yesterdayCounts['approved']),
+      cancelled: calcIncrement(cancelledCount, yesterdayCounts['cancelled']),
+      expired: calcIncrement(expiredCount, yesterdayCounts['expired']),
+      in_progress: calcIncrement(inProgressCount, yesterdayCounts['in_progress']),
+      completed: calcIncrement(completedCount, yesterdayCounts['completed']),
+      rejected: calcIncrement(rejectedCount, yesterdayCounts['rejected']),
+    };
+
+    // Rankings
+    const rankingPeriod = filter === 'custom' ? 'month' : filter;
+    
+    // Fetch all Verification Officers
+    const verificationOfficers = await prisma.user.findMany({
+      where: {
+        role: {
+          name: { contains: 'Verification' }
+        }
+      },
+      select: { id: true, full_name: true, username: true, image: true, outlet: { select: { name: true } } }
+    });
+
+    const rankings = await prisma.verificationRanking.findMany({
+      where: {
+        period: rankingPeriod,
+        month: rankingPeriod === 'month' ? nowDt.getMonth() + 1 : 0,
+        year: rankingPeriod === 'month' ? nowDt.getFullYear() : 0,
+      }
+    });
+
+    const rankingMap = rankings.reduce((acc, r) => { acc[r.officer_id] = r; return acc; }, {});
+
+    let officerRanking = verificationOfficers.map(officer => {
+      const rankRecord = rankingMap[officer.id];
+      const score = rankRecord ? rankRecord.score : 0;
+      let league = 'Bronze';
+      if (score >= 1500) league = 'Gold';
+      else if (score >= 1000) league = 'Silver';
+
+      return {
+        userId: officer.id,
+        name: officer.full_name,
+        username: officer.username,
+        image: officer.image,
+        outletName: officer.outlet?.name || 'Main Outlet',
+        uniqueCustomers: rankRecord ? rankRecord.unique_customers : 0,
+        delivered: rankRecord ? rankRecord.delivered_customers : 0,
+        completed: rankRecord ? rankRecord.completed_customers : 0,
+        cancelled: rankRecord ? rankRecord.cancelled_customers : 0,
+        expired: rankRecord ? rankRecord.expired_customers : 0,
+        totalSales: rankRecord ? rankRecord.total_sales : 0,
+        score: score,
+        trend: rankRecord ? rankRecord.trend : 0,
+        league: league
+      };
+    });
+
+    officerRanking.sort((a, b) => b.score - a.score);
+    officerRanking = officerRanking.map((r, index) => ({ ...r, rank: index + 1 }));
+
+    // Channel stats
+    const channelGroups = await prisma.order.groupBy({
+      by: ['channel', 'status'],
+      where: baseWhere,
+      _count: { id: true },
+    });
+
+    const channelMap = {};
+    channelGroups.forEach(item => {
+      const ch = (item.channel || 'unknown').toLowerCase();
+      if (!channelMap[ch]) channelMap[ch] = { total: 0, completed: 0, cancelled: 0 };
+      channelMap[ch].total += item._count.id;
+      if (item.status === 'completed' || item.status === 'approved') channelMap[ch].completed += item._count.id;
+      if (item.status === 'cancelled') channelMap[ch].cancelled += item._count.id;
+    });
+
+    const buildChannelStats = (names) => {
+      const combined = { total: 0, completed: 0, cancelled: 0 };
+      names.forEach(n => {
+        const data = channelMap[n.toLowerCase()];
+        if (data) {
+          combined.total += data.total;
+          combined.completed += data.completed;
+          combined.cancelled += data.cancelled;
+        }
+      });
+      combined.successRate = combined.total > 0 ? Math.round((combined.completed / combined.total) * 100) : 0;
+      combined.cancelRate = combined.total > 0 ? Math.round((combined.cancelled / combined.total) * 100) : 0;
+      return combined;
+    };
+
+    const channelStats = {
+      referral: buildChannelStats(['referral']),
+      call: buildChannelStats(['call']),
+      whatsapp: buildChannelStats(['whatsapp', 'whats_app', 'whats app']),
+      website: buildChannelStats(['website']),
+    };
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        filter,
+        dateRange: { start, end },
+        totalOrders,
+        statusCounts: {
+          new: newCount,
+          pending: pendingCount,
+          in_progress: inProgressCount,
+          cancelled: cancelledCount,
+          completed: completedCount,
+          delivered: deliveredCount,
+          expired: expiredCount,
+          approved: approvedCount,
+          rejected: rejectedCount,
+        },
+        bikeRange: officerInfo?.bike_km_range || 0,
+        workingHours: `${officerInfo?.working_hours_start || '09:00'} - ${officerInfo?.working_hours_end || '18:00'}`,
+        homeLocationRequiredCount,
+        topVisitDeadlineOrders,
+        todayIncrement,
+        channelStats,
+        officerRanking
+      },
+    });
+  } catch (error) {
+    console.error('getDashboardStats error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 module.exports = {
+  getVerificationDashboardStats,
   getVerifications,
   startVerification,
   savePurchaserVerification,
