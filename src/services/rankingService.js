@@ -255,9 +255,124 @@ function getWorkingDaysLeftInMonth() {
     return workingDays || 1; // At least 1 to avoid division by zero
 }
 
+/**
+ * Recalculates ranking for a Delivery Officer for a specific period.
+ */
+async function updateDeliveryRanking(officerId, periodType = 'month') {
+    const nowDate = new Date();
+    let start, end;
+
+    if (periodType === 'month') {
+        start = new Date(nowDate.getFullYear(), nowDate.getMonth(), 1, 0, 0, 0, 0);
+        end = new Date(nowDate.getFullYear(), nowDate.getMonth() + 1, 0, 23, 59, 59, 999);
+    } else if (periodType === 'today') {
+        start = new Date(nowDate); start.setHours(0, 0, 0, 0);
+        end = new Date(nowDate); end.setHours(23, 59, 59, 999);
+    } else if (periodType === 'week') {
+        const day = nowDate.getDay();
+        const diff = nowDate.getDate() - day + (day === 0 ? -6 : 1);
+        start = new Date(nowDate.setDate(diff)); start.setHours(0, 0, 0, 0);
+        end = new Date(start); end.setDate(start.getDate() + 6); end.setHours(23, 59, 59, 999);
+    }
+
+    const deliveries = await prisma.delivery.findMany({
+        where: {
+            delivery_agent_id: officerId,
+            updated_at: { gte: start, lte: end }
+        },
+        include: {
+            order: {
+                include: { customer: true }
+            }
+        }
+    });
+
+    const uniqueCustomerIds = new Set(deliveries.map(d => d.order?.customer_id).filter(Boolean));
+    const uniqueCustomersCount = uniqueCustomerIds.size;
+
+    let deliveredCount = 0;
+    let completedCount = 0;
+    let repeatCount = 0;
+    let cancelledCount = 0;
+    let expiredCount = 0;
+    let totalSales = 0;
+
+    deliveries.forEach(d => {
+        if (d.status === 'delivered') {
+            deliveredCount++;
+            totalSales += (d.order?.total_amount || 0);
+        }
+        if (d.status === 'completed') completedCount++;
+        if (d.status === 'cancelled') cancelledCount++;
+        if (d.status === 'expired') expiredCount++;
+        if (d.order?.is_repeat_customer) repeatCount++;
+    });
+
+    // Score logic for Delivery Agent
+    const score = (deliveredCount * 10) + (completedCount * 5) - (cancelledCount * 2) - (expiredCount * 3);
+
+    const existingRanking = await prisma.deliveryRanking.findUnique({
+        where: {
+            officer_id_period_month_year: {
+                officer_id: officerId,
+                period: periodType,
+                month: periodType === 'month' ? nowDate.getMonth() + 1 : 0,
+                year: periodType === 'month' ? nowDate.getFullYear() : 0
+            }
+        }
+    });
+
+    let trend = existingRanking?.trend || 0;
+    if (existingRanking && score !== existingRanking.score) {
+        trend = score > existingRanking.score ? 1 : -1;
+    }
+
+    const ranking = await prisma.deliveryRanking.upsert({
+        where: {
+            officer_id_period_month_year: {
+                officer_id: officerId,
+                period: periodType,
+                month: periodType === 'month' ? nowDate.getMonth() + 1 : 0,
+                year: periodType === 'month' ? nowDate.getFullYear() : 0
+            }
+        },
+        update: {
+            unique_customers: uniqueCustomersCount,
+            delivered_customers: deliveredCount,
+            completed_customers: completedCount,
+            repeat_customers: repeatCount,
+            cancelled_customers: cancelledCount,
+            expired_customers: expiredCount,
+            total_sales: totalSales,
+            score: score,
+            trend: trend,
+            updated_at: now()
+        },
+        create: {
+            officer_id: officerId,
+            period: periodType,
+            month: periodType === 'month' ? nowDate.getMonth() + 1 : 0,
+            year: periodType === 'month' ? nowDate.getFullYear() : 0,
+            unique_customers: uniqueCustomersCount,
+            delivered_customers: deliveredCount,
+            completed_customers: completedCount,
+            repeat_customers: repeatCount,
+            cancelled_customers: cancelledCount,
+            expired_customers: expiredCount,
+            total_sales: totalSales,
+            score: score,
+            trend: 0,
+            updated_at: now()
+        }
+    });
+
+    return ranking;
+}
+
 module.exports = {
     getOrCreateCustomer,
     checkRepeatStatus,
     updateCsrRanking,
-    getWorkingDaysLeftInMonth
+    getWorkingDaysLeftInMonth,
+    updateDeliveryRanking
 };

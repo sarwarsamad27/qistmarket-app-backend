@@ -351,56 +351,83 @@ const checkPhoneOrders = async (req, res) => {
     }
 };
 
-const getCNICOrderHistory = async (req, res) => {
-    const { cnic } = req.query;
+const buildVerificationRoleMap = async ({ cnic, phone }) => {
+    const verificationRoleMap = new Map();
 
-    if (!cnic || !cnic.trim()) {
-        return res.status(400).json({ success: false, message: 'cnic query parameter is required' });
-    }
+    const setRole = (verificationId, role, isBlacklisted) => {
+        if (!verificationId) return;
+        const existing = verificationRoleMap.get(verificationId);
+        if (!existing || isBlacklisted) {
+            verificationRoleMap.set(verificationId, {
+                role,
+                is_blacklisted: isBlacklisted || existing?.is_blacklisted || false,
+            });
+        }
+    };
 
-    const normalizedCnic = cnic.trim();
-
-    try {
-        // ── 1. Find all verifications where this CNIC is a Purchaser ──
+    if (cnic) {
         const purchaserMatches = await prisma.purchaserVerification.findMany({
-            where: { cnic_number: normalizedCnic },
-            select: { verification_id: true, is_blacklisted: true }
+            where: { cnic_number: cnic },
+            select: { verification_id: true, is_blacklisted: true, name: true },
         });
-
-        // ── 2. Find all verifications where this CNIC is a Guarantor ──
-        const grantorMatches = await prisma.grantorVerification.findMany({
-            where: { cnic_number: normalizedCnic },
-            select: { verification_id: true, grantor_number: true, is_blacklisted: true }
-        });
-
-        // Build a map: verificationId → role label
-        const verificationRoleMap = new Map();
         purchaserMatches.forEach(pm => {
-            if (pm.is_blacklisted) {
-                verificationRoleMap.set(pm.verification_id, {
-                    role: 'Purchaser',
-                    is_blacklisted: pm.is_blacklisted
-                });
-            }
+            setRole(pm.verification_id, 'Purchaser', pm.is_blacklisted);
+        });
+
+        const grantorMatches = await prisma.grantorVerification.findMany({
+            where: { cnic_number: cnic },
+            select: { verification_id: true, grantor_number: true, is_blacklisted: true, name: true },
         });
         grantorMatches.forEach(gm => {
-            // Only add if blacklisted and not already added as a purchaser
-            if (gm.is_blacklisted && !verificationRoleMap.has(gm.verification_id)) {
-                verificationRoleMap.set(gm.verification_id, {
-                    role: `Guarantor ${gm.grantor_number || ''}`.trim(),
-                    is_blacklisted: gm.is_blacklisted
-                });
+            if (!verificationRoleMap.has(gm.verification_id)) {
+                setRole(
+                    gm.verification_id,
+                    `Guarantor ${gm.grantor_number || ''}`.trim(),
+                    gm.is_blacklisted
+                );
+            }
+        });
+    }
+
+    if (phone) {
+        const purchaserPhoneMatches = await prisma.purchaserVerification.findMany({
+            where: { telephone_number: phone },
+            select: { verification_id: true, is_blacklisted: true },
+        });
+        purchaserPhoneMatches.forEach(pm => {
+            setRole(pm.verification_id, 'Purchaser', pm.is_blacklisted);
+        });
+
+        const grantorPhoneMatches = await prisma.grantorVerification.findMany({
+            where: { telephone_number: phone },
+            select: { verification_id: true, grantor_number: true, is_blacklisted: true },
+        });
+        grantorPhoneMatches.forEach(gm => {
+            if (!verificationRoleMap.has(gm.verification_id)) {
+                setRole(
+                    gm.verification_id,
+                    `Guarantor ${gm.grantor_number || ''}`.trim(),
+                    gm.is_blacklisted
+                );
             }
         });
 
-        if (verificationRoleMap.size === 0) {
-            return res.json({ success: true, cnic: normalizedCnic, total: 0, orders: [] });
-        }
+        const directOrders = await prisma.order.findMany({
+            where: { whatsapp_number: phone },
+            select: { id: true, verification: { select: { id: true } } },
+        });
+        directOrders.forEach(o => {
+            if (o.verification?.id && !verificationRoleMap.has(o.verification.id)) {
+                setRole(o.verification.id, 'Order Contact', false);
+            }
+        });
+    }
 
-        const verificationIds = Array.from(verificationRoleMap.keys());
+    return verificationRoleMap;
+};
 
-        // ── 3. Fetch full order details via verification IDs ──
-        const verifications = await prisma.verification.findMany({
+const fetchVerificationsWithOrders = async (verificationIds) => {
+    return prisma.verification.findMany({
             where: { id: { in: verificationIds } },
             include: {
                 order: {
@@ -466,8 +493,9 @@ const getCNICOrderHistory = async (req, res) => {
                 }
             }
         });
+};
 
-        // ── 4. Shape the response ──
+const shapeOrderHistoryResponse = (verifications, verificationRoleMap) => {
         const orders = verifications.map(verification => {
             const order = verification.order;
             const roleInfo = verificationRoleMap.get(verification.id);
@@ -588,19 +616,66 @@ const getCNICOrderHistory = async (req, res) => {
             };
         });
 
-        // Sort by latest order created_at first
         orders.sort((a, b) => new Date(b.order.created_at) - new Date(a.order.created_at));
+        return orders;
+};
+
+const getPersonOrderHistory = async (req, res) => {
+    const { cnic, phone } = req.query;
+    const normalizedCnic = cnic?.trim() || null;
+    const normalizedPhone = phone?.trim()?.replace(/\s+/g, '') || null;
+
+    if (!normalizedCnic && !normalizedPhone) {
+        return res.status(400).json({
+            success: false,
+            message: 'cnic or phone query parameter is required',
+        });
+    }
+
+    try {
+        const verificationRoleMap = await buildVerificationRoleMap({
+            cnic: normalizedCnic,
+            phone: normalizedPhone,
+        });
+
+        if (verificationRoleMap.size === 0) {
+            return res.json({
+                success: true,
+                cnic: normalizedCnic,
+                phone: normalizedPhone,
+                total: 0,
+                orders: [],
+            });
+        }
+
+        const verificationIds = Array.from(verificationRoleMap.keys());
+        const verifications = await fetchVerificationsWithOrders(verificationIds);
+        const orders = shapeOrderHistoryResponse(verifications, verificationRoleMap);
 
         return res.json({
             success: true,
             cnic: normalizedCnic,
+            phone: normalizedPhone,
             total: orders.length,
-            orders
+            orders,
         });
     } catch (error) {
-        console.error('getCNICOrderHistory Error:', error);
+        console.error('getPersonOrderHistory Error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
     }
 };
 
-module.exports = { globalSearch, checkCNICOrders, checkPhoneOrders, getCNICOrderHistory };
+const getCNICOrderHistory = async (req, res) => {
+    if (!req.query.cnic?.trim()) {
+        return res.status(400).json({ success: false, message: 'cnic query parameter is required' });
+    }
+    return getPersonOrderHistory(req, res);
+};
+
+module.exports = {
+    globalSearch,
+    checkCNICOrders,
+    checkPhoneOrders,
+    getCNICOrderHistory,
+    getPersonOrderHistory,
+};

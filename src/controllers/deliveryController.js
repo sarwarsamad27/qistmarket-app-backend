@@ -2056,13 +2056,7 @@ const replaceDeliveryUpload = async (req, res) => {
 const getDeliveryDashboardStats = async (req, res) => {
   try {
     const { filter = 'today', startDate, endDate } = req.query;
-    const userId = req.user?.id;
-
-    // Fetch officer info from DB (for bike_km_range, working_hours)
-    const officerInfo = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { bike_km_range: true, working_hours_start: true, working_hours_end: true }
-    });
+    const userId = req.user.id;
 
     // Trigger async ranking update
     updateDeliveryRanking(userId, 'today').catch(err => console.error('Auto-ranking update error:', err));
@@ -2087,192 +2081,325 @@ const getDeliveryDashboardStats = async (req, res) => {
 
     const dateFilter = { gte: start, lte: end };
 
-    const baseWhere = {
-      updated_at: dateFilter,
-      delivery_officer_id: userId
-    };
-
-    // Status counts
-    const statusGroups = await prisma.order.groupBy({
-      by: ['status'],
-      where: baseWhere,
-      _count: { id: true },
+    // ─── 1. MY ORDERS in period ──────────────────────────────────────────────
+    const myOrders = await prisma.order.findMany({
+      where: {
+        delivery_officer_id: userId,
+        updated_at: dateFilter,
+      },
+      select: {
+        id: true,
+        status: true,
+        total_amount: true,
+        customer_id: true,
+        channel: true,
+      }
     });
 
-    const statusCounts = statusGroups.reduce((acc, item) => {
-      acc[item.status] = item._count.id;
-      return acc;
-    }, {});
+    let assignedOrders = myOrders.length;
+    let deliveredOrders = 0;
+    let newDeliveries = 0;
+    let cancelledCount = 0;
+    let rejectedCount = 0;
+    let expiredCount = 0;
+    let postponedCount = 0;
+    let deliveredSalesAmount = 0;
+    const uniqueCustomerIds = new Set();
+    const channelMap = {};
 
-    const totalOrders = Object.values(statusCounts).reduce((a, b) => a + b, 0);
-    const newCount = statusCounts['new'] || 0;
-    const pendingCount = statusCounts['pending'] || 0;
-    const inProgressCount = statusCounts['in_progress'] || 0;
-    const cancelledCount = statusCounts['cancelled'] || 0;
-    const completedCount = statusCounts['completed'] || 0;
-    const deliveredCount = statusCounts['delivered'] || 0;
-    const expiredCount = statusCounts['expired'] || 0;
-    const postponedCount = statusCounts['postponed'] || 0;
-    const rejectedCount = statusCounts['rejected'] || 0;
+    myOrders.forEach(o => {
+      const status = o.status;
+      if (status === 'delivered') {
+        deliveredOrders++;
+        deliveredSalesAmount += (o.total_amount || 0);
+        if (o.customer_id) uniqueCustomerIds.add(o.customer_id);
+      }
+      if (status === 'new' || status === 'pending') newDeliveries++;
+      if (status === 'cancelled') cancelledCount++;
+      if (status === 'rejected') rejectedCount++;
+      if (status === 'expired') expiredCount++;
+      if (status === 'postponed') postponedCount++;
 
-    // Delivery-specific metrics
-    const homeLocationRequiredCount = await prisma.verification.count({
-        where: {
-            order: { delivery_officer_id: userId, updated_at: dateFilter },
-            home_location_required: true,
+      // Channel breakdown from orders directly
+      const ch = (o.channel || 'unknown').toLowerCase();
+      if (!channelMap[ch]) channelMap[ch] = { total: 0, delivered: 0, cancelled: 0 };
+      channelMap[ch].total += 1;
+      if (status === 'delivered') channelMap[ch].delivered += 1;
+      if (status === 'cancelled') channelMap[ch].cancelled += 1;
+    });
+
+    const customersDone = deliveredOrders; // Do not use uniqueCustomerIds as requested
+
+    // ─── 2. Home location required ───────────────────────────────────────────
+    const orderIds = myOrders.map(o => o.id);
+    let homeLocationRequired = 0;
+    if (orderIds.length > 0) {
+      homeLocationRequired = await prisma.verification.count({
+        where: { order_id: { in: orderIds }, home_location_required: true }
+      });
+    }
+
+    // ─── 3. Officer profile info & Working Hours (from officer_profile_history) ──
+    const officerInfo = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { officer_profile_history: true }
+    });
+
+    let bikeRange = 0;
+    let totalWorkingSeconds = 0;
+
+    if (officerInfo?.officer_profile_history) {
+      const history = Array.isArray(officerInfo.officer_profile_history)
+        ? officerInfo.officer_profile_history
+        : [];
+
+      history.forEach(entry => {
+        // ── Working Hours: filter by actual session date (working_hours_start) ──
+        const wsStart = entry.updated?.working_hours_start
+          ? new Date(entry.updated.working_hours_start)
+          : null;
+        const wsEnd = entry.updated?.working_hours_end
+          ? new Date(entry.updated.working_hours_end)
+          : null;
+
+        if (wsStart && wsStart >= start && wsStart <= end) {
+          if (wsEnd && wsEnd > wsStart) {
+            totalWorkingSeconds += (wsEnd - wsStart) / 1000; // accurate to the second
+          }
         }
-    });
 
-    const cashInHandSum = await prisma.cashInHand.aggregate({
-        where: { officer_id: userId, status: 'pending' },
-        _sum: { amount: true }
-    });
+        // ── Bike KM: filter by updatedAt, take positive delta ──────────────────
+        const entryDate = new Date(entry.updatedAt);
+        if (entryDate >= start && entryDate <= end) {
+          const prevKm = Number(entry.previous?.bike_km_range || 0);
+          const updKm  = Number(entry.updated?.bike_km_range  || 0);
+          const delta  = updKm - prevKm;
+          if (delta > 0) bikeRange += delta;
+        }
+      });
+    }
 
-    const deliveredAmountSum = await prisma.order.aggregate({
-        where: { delivery_officer_id: userId, status: 'delivered', updated_at: dateFilter },
-        _sum: { total_amount: true }
-    });
+    const workingHoursNum = totalWorkingSeconds > 0
+      ? Number((totalWorkingSeconds / 3600).toFixed(2))
+      : 0;
 
-    const topVisitDeadlineOrders = await prisma.order.findMany({
-        where: {
-            delivery_officer_id: userId,
-            status: { in: ['pending', 'in_progress'] }
-        },
-        orderBy: { updated_at: 'asc' },
-        take: 5
-    });
-
-    // Stock value/qty calculation
+    // ─── 4. Stock Value & Qty ─────────────────────────────────────────────────
     const stockTransfers = await prisma.stockTransfer.findMany({
       where: {
         to_type: 'Delivery Officer',
         to_id: userId,
-        status: { in: ['transferred'] }
+        status: { in: ['transferred', 'pending'] }
       },
-      include: {
-        inventory: true
-      }
+      include: { inventory: true }
     });
-    
+
     let stockValue = 0;
     let stockQty = 0;
     stockTransfers.forEach(st => {
-      stockQty += st.quantity_transferred;
-      stockValue += (st.inventory.sale_price || st.inventory.purchase_price || 0) * st.quantity_transferred;
+      const qty = st.quantity_transferred || 0;
+      const price = st.inventory?.installment_price || st.inventory?.sale_price || st.inventory?.purchase_price || 0;
+      stockQty += qty;
+      stockValue += price * qty;
     });
+    if (stockQty < 0) stockQty = 0;
+    if (stockValue < 0) stockValue = 0;
 
-    // Yesterday for increment
-    const yesterdayStart = new Date(start); yesterdayStart.setDate(yesterdayStart.getDate() - 1);
-    const yesterdayEnd = new Date(end); yesterdayEnd.setDate(yesterdayEnd.getDate() - 1);
-
-    const yesterdayStatusGroups = await prisma.order.groupBy({
-      by: ['status'],
-      where: { ...baseWhere, updated_at: { gte: yesterdayStart, lte: yesterdayEnd } },
-      _count: { id: true },
+    // ─── 5. Cash In Hand ──────────────────────────────────────────────────────
+    const cashEntries = await prisma.cashInHand.findMany({
+      where: { officer_id: userId, status: { in: ['pending', 'partial'] } }
     });
+    const totalCashInHand = cashEntries.reduce((sum, c) => {
+      return sum + ((c.amount || 0) - (c.submitted_amount || 0));
+    }, 0);
 
-    const yesterdayCounts = yesterdayStatusGroups.reduce((acc, item) => {
-      acc[item.status] = item._count.id;
-      return acc;
-    }, {});
-
-    const calcIncrement = (curr, prev) => {
-      if (!prev || prev === 0) return curr > 0 ? 100 : 0;
-      return Math.round(((curr - prev) / prev) * 100);
-    };
-
-    const todayIncrement = {
-      total: calcIncrement(totalOrders, Object.values(yesterdayCounts).reduce((a, b) => a + b, 0)),
-      new: calcIncrement(newCount, yesterdayCounts['new']),
-      pending: calcIncrement(pendingCount, yesterdayCounts['pending']),
-      delivered: calcIncrement(deliveredCount, yesterdayCounts['delivered']),
-      cancelled: calcIncrement(cancelledCount, yesterdayCounts['cancelled']),
-      expired: calcIncrement(expiredCount, yesterdayCounts['expired']),
-      postponed: calcIncrement(postponedCount, yesterdayCounts['postponed']),
-      rejected: calcIncrement(rejectedCount, yesterdayCounts['rejected']),
-    };
-
-    // Rankings
+    // ─── 6. Rankings: ALL delivery officers, computed live ────────────────────
     const rankingPeriod = filter === 'custom' ? 'month' : filter;
-    
-    const deliveryOfficers = await prisma.user.findMany({
-      where: {
-        role: {
-          name: { contains: 'Delivery' }
-        }
-      },
-      select: { id: true, full_name: true, username: true, image: true, outlet: { select: { name: true } } }
+
+    // Get all Delivery Agent users
+    const allDeliveryOfficers = await prisma.user.findMany({
+      where: { role: { name: { contains: 'Delivery' } } },
+      select: { id: true, username: true, full_name: true, outlet: { select: { name: true } } }
     });
 
-    const rankings = await prisma.deliveryRanking.findMany({
+    const allOfficerIds = allDeliveryOfficers.map(o => o.id);
+
+    // Get their orders in the period
+    const allOfficerOrders = await prisma.order.findMany({
       where: {
-        period: rankingPeriod,
-        month: rankingPeriod === 'month' ? nowDt.getMonth() + 1 : 0,
-        year: rankingPeriod === 'month' ? nowDt.getFullYear() : 0,
+        delivery_officer_id: { in: allOfficerIds },
+        updated_at: dateFilter
+      },
+      select: {
+        delivery_officer_id: true,
+        status: true,
+        total_amount: true,
+        customer_id: true,
       }
     });
 
-    const rankingMap = rankings.reduce((acc, r) => { acc[r.officer_id] = r; return acc; }, {});
+    // Also load DB rankings as fallback for officers with no orders this period
+    const dbRankings = await prisma.deliveryRanking.findMany({
+      where: {
+        officer_id: { in: allOfficerIds },
+        period: rankingPeriod,
+        month: rankingPeriod === 'month' ? nowDt.getMonth() + 1 : 0,
+        year: rankingPeriod === 'month' ? nowDt.getFullYear() : 0,
+      },
+      include: { user: { include: { outlet: true } } }
+    });
+    const dbRankingMap = {};
+    dbRankings.forEach(r => { dbRankingMap[r.officer_id] = r; });
 
-    let officerRanking = deliveryOfficers.map(officer => {
-      const rankRecord = rankingMap[officer.id];
-      const score = rankRecord ? rankRecord.score : 0;
+    // Group live orders by officer
+    const liveMap = {};
+    allOfficerOrders.forEach(o => {
+      const oid = o.delivery_officer_id;
+      if (!liveMap[oid]) {
+        liveMap[oid] = {
+          delivered: 0,
+          completed: 0,
+          cancelled: 0,
+          expired: 0,
+          totalSales: 0,
+          uniqueCustomers: new Set(),
+          hasData: false,
+        };
+      }
+      liveMap[oid].hasData = true;
+      if (o.status === 'delivered') liveMap[oid].delivered++;
+      if (o.status === 'completed') liveMap[oid].completed++;
+      if (o.status === 'delivered' || o.status === 'completed') {
+        liveMap[oid].totalSales += (o.total_amount || 0);
+        if (o.customer_id) liveMap[oid].uniqueCustomers.add(o.customer_id);
+      }
+      if (o.status === 'cancelled') liveMap[oid].cancelled++;
+      if (o.status === 'expired') liveMap[oid].expired++;
+    });
+
+    // Compute score for every officer
+    let officerRankData = allDeliveryOfficers.map(officer => {
+      const live = liveMap[officer.id];
+      const db = dbRankingMap[officer.id];
+
+      // Use live data if we have any orders this period, else DB
+      const delivered = live?.delivered ?? (db?.delivered_customers || 0);
+      const completed = live?.completed ?? (db?.completed_customers || 0);
+      const cancelled = live?.cancelled ?? (db?.cancelled_customers || 0);
+      const expired = live?.expired ?? (db?.expired_customers || 0);
+      const uniqueCustomers = live?.hasData
+        ? live.uniqueCustomers.size
+        : (db?.unique_customers || delivered);
+      const totalSales = live?.hasData
+        ? live.totalSales
+        : (db?.total_sales || 0);
+      const score = (delivered * 10) + (completed * 5) - (cancelled * 2) - (expired * 3);
+
       let league = 'Bronze';
-      if (score >= 1500) league = 'Gold';
-      else if (score >= 1000) league = 'Silver';
+      if (score >= 300) league = 'Diamond';
+      else if (score >= 100) league = 'Gold';
+      else if (score >= 30) league = 'Silver';
+
+      const outletName = officer.outlet?.name ||
+        (db && dbRankingMap[officer.id]?.user?.outlet?.name) ||
+        'Main';
 
       return {
-        userId: officer.id,
-        name: officer.full_name,
-        username: officer.username,
-        image: officer.image,
-        outletName: officer.outlet?.name || 'Main Outlet',
-        uniqueCustomers: rankRecord ? rankRecord.unique_customers : 0,
-        delivered: rankRecord ? rankRecord.delivered_customers : 0,
-        completed: rankRecord ? rankRecord.completed_customers : 0,
-        cancelled: rankRecord ? rankRecord.cancelled_customers : 0,
-        expired: rankRecord ? rankRecord.expired_customers : 0,
-        totalSales: rankRecord ? rankRecord.total_sales : 0,
-        score: score,
-        trend: rankRecord ? rankRecord.trend : 0,
-        league: league
+        officerId: officer.id,
+        name: officer.username || officer.full_name || 'Officer',
+        outletName,
+        score,
+        league,
+        delivered,
+        uniqueCustomers,
+        totalSales,
+        isMe: officer.id === userId
       };
     });
 
-    officerRanking.sort((a, b) => b.score - a.score);
-    officerRanking = officerRanking.map((r, index) => ({ ...r, rank: index + 1 }));
+    officerRankData.sort(
+      (a, b) => b.uniqueCustomers - a.uniqueCustomers || b.score - a.score
+    );
+
+    let currentRank = 1;
+    const officerRanking = officerRankData.map((r, i) => {
+      if (i > 0 && r.uniqueCustomers < officerRankData[i - 1].uniqueCustomers) {
+        currentRank = i + 1;
+      }
+      return {
+        rank: currentRank,
+        name: r.name,
+        outletName: r.outletName,
+        score: r.score,
+        league: r.league,
+        delivered: r.delivered,
+        uniqueCustomers: r.uniqueCustomers,
+        totalSales: r.totalSales,
+        isMe: r.isMe
+      };
+    });
+
+    // ─── 7. Target Tracking ───────────────────────────────────────────────────
+    const monthlyTarget = Number(process.env.DELIVERY_TARGET_AMOUNT || 500000);
+    const customerTarget = Number(process.env.DELIVERY_TARGET_CUSTOMERS || 50);
+    const remainingAmount = Math.max(0, monthlyTarget - deliveredSalesAmount);
+    const remainingCustomers = Math.max(0, customerTarget - customersDone);
+
+    // ─── 8. Source success rate ───────────────────────────────────────────────
+    const buildChannelStats = (names) => {
+      const combined = { total: 0, delivered: 0, cancelled: 0 };
+      names.forEach(n => {
+        const data = channelMap[n.toLowerCase()];
+        if (data) {
+          combined.total += data.total;
+          combined.delivered += data.delivered;
+          combined.cancelled += data.cancelled;
+        }
+      });
+      combined.successRate = combined.total > 0 ? Math.round((combined.delivered / combined.total) * 100) : 0;
+      combined.cancelRate = combined.total > 0 ? Math.round((combined.cancelled / combined.total) * 100) : 0;
+      return combined;
+    };
+
+    const sourceSuccessRate = {
+      referral: buildChannelStats(['referral', 'outlet referral', 'outlet']),
+      call: buildChannelStats(['call']),
+      whatsapp: buildChannelStats(['whatsapp', 'whats_app', 'whats app']),
+      website: buildChannelStats(['website']),
+    };
 
     return res.status(200).json({
       success: true,
       data: {
-        filter,
-        dateRange: { start, end },
-        totalOrders,
-        statusCounts: {
-          new: newCount,
-          pending: pendingCount,
-          in_progress: inProgressCount,
-          cancelled: cancelledCount,
-          completed: completedCount,
-          delivered: deliveredCount,
-          expired: expiredCount,
-          postponed: postponedCount,
-          rejected: rejectedCount,
-        },
-        bikeRange: officerInfo?.bike_km_range || 0,
-        workingHours: `${officerInfo?.working_hours_start || '09:00'} - ${officerInfo?.working_hours_end || '18:00'}`,
-        homeLocationRequiredCount,
-        cashInHand: cashInHandSum._sum.amount || 0,
-        deliveredAmount: deliveredAmountSum._sum.total_amount || 0,
+        assignedOrders,
+        deliveredOrders,
+        newDeliveries,
+        homeLocationRequired,
+        cancelledCount,
+        rejectedCount,
+        expiredCount,
+        postponedCount,
+        bikeRange,
+        workingHours: workingHoursNum,
+        customersDone,
         stockValue,
         stockQty,
-        topVisitDeadlineOrders,
-        todayIncrement,
-        officerRanking
-      },
+        cashInHand: totalCashInHand,
+        deliveredSalesAmount,
+        officerRanking,
+        targetTracking: {
+          achievedAmount: deliveredSalesAmount,
+          targetAmount: monthlyTarget,
+          remainingAmount,
+          achievedCustomers: customersDone,
+          targetCustomers: customerTarget,
+          remainingCustomers
+        },
+        sourceSuccessRate
+      }
     });
+
   } catch (error) {
-    console.error('getDashboardStats error:', error);
+    console.error('getDeliveryDashboardStats error:', error);
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };

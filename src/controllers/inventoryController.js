@@ -133,6 +133,7 @@ const getInventory = async (req, res) => {
 
     try {
         // 1. Get unique product names that match search criteria
+        // Exclude 'Pending Transfer' items — they are tracked in transfer history, not inventory list
         const productSearchWhere = {
             outlet_id,
             OR: search ? [
@@ -161,7 +162,7 @@ const getInventory = async (req, res) => {
 
         const productNames = distinctProducts.map(p => p.product_name);
 
-        // 2. Fetch all records for these product names
+        // 2. Fetch all records for these product names (excluding Pending Transfer)
         const inventory = await prisma.outletInventory.findMany({
             where: {
                 outlet_id,
@@ -336,6 +337,32 @@ const initiateStockTransfer = async (req, res) => {
         if (items.length !== rawIds.length) {
             return res.status(400).json({ success: false, message: 'Some items could not be found or are not in stock.' });
         }
+
+        // ── Duplicate IMEI conflict check ───────────────────────────────────────
+        // Check if any selected IMEI already has an active pending transfer
+        const imeiItems = items.filter(i => i.imei_serial && i.imei_serial.trim() !== '');
+        if (imeiItems.length > 0) {
+            const conflictingTransfers = await prisma.stockTransfer.findMany({
+                where: {
+                    inventory_id: { in: imeiItems.map(i => i.id) },
+                    status: 'pending'
+                },
+                include: { inventory: { select: { imei_serial: true, product_name: true } } }
+            });
+            if (conflictingTransfers.length > 0) {
+                return res.status(409).json({
+                    success: false,
+                    conflict: true,
+                    conflicting_imeis: conflictingTransfers.map(c => ({
+                        transfer_id: c.id,
+                        imei: c.inventory?.imei_serial || 'N/A',
+                        product_name: c.inventory?.product_name || 'Unknown'
+                    })),
+                    message: 'Some selected items already have active pending transfers.'
+                });
+            }
+        }
+        // ────────────────────────────────────────────────────────────────────────
 
         const otp = Math.floor(10000 + Math.random() * 90000).toString();
 
@@ -525,11 +552,14 @@ const verifyStockTransfer = async (req, res) => {
 
         // Fetch items that are in 'Pending Transfer' status at the origin outlet
         const items = await prisma.outletInventory.findMany({
-            where: { id: { in: rawIds }, outlet_id, status: 'Pending Transfer' }
+            where: { id: { in: rawIds }, outlet_id }
         });
 
         if (items.length !== rawIds.length) {
-            return res.status(400).json({ success: false, message: 'Some items could not be found or are not in pending transfer status.' });
+            return res.status(400).json({
+                success: false,
+                message: 'Some items could not be found or do not belong to this outlet.'
+            });
         }
 
         // Process transfers
@@ -930,13 +960,10 @@ const cancelStockTransfer = async (req, res) => {
             // 2. Revert inventory status
             for (const t of transfers) {
                 const inv = await tx.outletInventory.findUnique({ where: { id: t.inventory_id } });
-                if (inv && inv.status === 'Pending Transfer') {
+                if (inv) {
                     await tx.outletInventory.update({
                         where: { id: inv.id },
-                        data: { 
-                            status: 'In Stock',
-                            updated_at: now()   // ✅ explicit updated_at
-                        }
+                        data: { status: 'In Stock', updated_at: now() }
                     });
                 }
             }
@@ -1065,51 +1092,59 @@ const resendStockTransferOTP = async (req, res) => {
 };
 
 const initiateStockBack = async (req, res) => {
-    const { transfer_id } = req.body;
+    const { transfer_id, transfer_ids } = req.body;
     const requesterId = req.user.id;
     const requesterOutletId = req.user.outlet_id;
 
-    if (!transfer_id) {
-        return res.status(400).json({ success: false, message: 'Missing transfer ID.' });
+    let ids = [];
+    if (transfer_ids && Array.isArray(transfer_ids) && transfer_ids.length > 0) {
+        ids = transfer_ids;
+    } else if (transfer_id) {
+        ids = [transfer_id];
+    }
+
+    if (ids.length === 0) {
+        return res.status(400).json({ success: false, message: 'Missing transfer IDs.' });
     }
 
     try {
-        const transfer = await prisma.stockTransfer.findUnique({
-            where: { id: parseInt(transfer_id) },
+        const transfers = await prisma.stockTransfer.findMany({
+            where: { id: { in: ids.map(id => parseInt(id)) } },
             include: { inventory: true }
         });
 
-        if (!transfer) {
-            return res.status(404).json({ success: false, message: 'Transfer record not found.' });
+        if (transfers.length === 0) {
+            return res.status(404).json({ success: false, message: 'Transfer records not found.' });
         }
 
-        if (transfer.status !== 'transferred' && transfer.status !== 'pending') {
-            return res.status(400).json({ success: false, message: `Cannot back stock in ${transfer.status} status.` });
+        // Validate all transfers belong to the same original receiver
+        const firstTransfer = transfers[0];
+        const backGiverId = firstTransfer.to_id;
+        const backGiverType = firstTransfer.to_type;
+
+        for (const t of transfers) {
+            if (t.to_id !== backGiverId || t.to_type !== backGiverType) {
+                return res.status(400).json({ success: false, message: 'All selected transfers must belong to the same recipient.' });
+            }
+            if (t.status !== 'transferred' && t.status !== 'pending' && t.status !== 'delivered') {
+                return res.status(400).json({ success: false, message: `Cannot back stock in ${t.status} status.` });
+            }
         }
-
-        // Determine Giver and Receiver for the Back action
-        // Original: from_id -> to_id
-        // Back: to_id -> from_id
-
-        // Receiver of the back transfer is the original sender (always an outlet currently)
-        const backReceiverId = transfer.from_id;
-        const backReceiverType = transfer.from_type; // 'Outlet'
-
-        // Giver of the back transfer is the original receiver
-        const backGiverId = transfer.to_id;
-        const backGiverType = transfer.to_type; // 'Outlet' or 'Delivery Officer'
 
         // Check if requester is authorized (either original sender or original receiver)
-        const isAuthorized = (requesterOutletId === transfer.from_id) ||
-            (transfer.to_type === 'Outlet' && requesterOutletId === transfer.to_id) ||
-            (transfer.to_type === 'Delivery Officer' && requesterId === transfer.to_id);
+        const isAuthorized = (requesterOutletId === firstTransfer.from_id) ||
+            (backGiverType === 'Outlet' && requesterOutletId === backGiverId) ||
+            (backGiverType === 'Delivery Officer' && requesterId === backGiverId);
 
         if (!isAuthorized) {
-            return res.status(403).json({ success: false, message: 'Unauthorized to initiate stock back for this transfer.' });
+            return res.status(403).json({ success: false, message: 'Unauthorized to initiate stock back for these transfers.' });
         }
 
         const otp = Math.floor(10000 + Math.random() * 90000).toString();
-        const phoneKey = `back_${transfer.id}`;
+        const phoneKey = ids.length > 1 ? `back_bulk_${transfers.map(t => t.id).join('_').substring(0, 50)}` : `back_${firstTransfer.id}`;
+
+        const backReceiverId = firstTransfer.from_id;
+        const backReceiverType = firstTransfer.from_type; // 'Outlet'
 
         await prisma.otp.create({
             data: {
@@ -1117,8 +1152,8 @@ const initiateStockBack = async (req, res) => {
                 otp,
                 purpose: 'stock_back',
                 expiresAt: new Date(Date.now() + 10 * 60000),
-                createdAt: now(),   // ✅ explicit createdAt
-                updatedAt: now()    // ✅ explicit updatedAt
+                createdAt: now(),
+                updatedAt: now()
             }
         });
 
@@ -1130,23 +1165,25 @@ const initiateStockBack = async (req, res) => {
 
             // Notify Receiver (Original Sender) - They get the OTP
             io.to(receiverRoom).emit('stock_back_initiated', {
-                transfer_id: transfer.id,
+                transfer_id: ids[0],
+                transfer_ids: ids,
                 otp: otp,
-                product_name: transfer.inventory?.product_name,
-                imei_serial: transfer.inventory?.imei_serial,
+                product_name: ids.length > 1 ? 'Bulk Items' : firstTransfer.inventory?.product_name,
+                imei_serial: ids.length > 1 ? null : firstTransfer.inventory?.imei_serial,
                 role: 'receiver'
             });
 
             // Notify Giver (Original Receiver) - They get the OTP input popup
             io.to(giverRoom).emit('stock_back_initiated', {
-                transfer_id: transfer.id,
-                product_name: transfer.inventory?.product_name,
-                imei_serial: transfer.inventory?.imei_serial,
+                transfer_id: ids[0],
+                transfer_ids: ids,
+                product_name: ids.length > 1 ? 'Bulk Items' : firstTransfer.inventory?.product_name,
+                imei_serial: ids.length > 1 ? null : firstTransfer.inventory?.imei_serial,
                 role: 'giver'
             });
         }
 
-        res.json({ success: true, message: 'Stock back initiated. OTP sent to the other party.' });
+        res.json({ success: true, message: 'Stock back initiated. OTP sent to the other party.', phoneKey });
     } catch (error) {
         console.error('initiateStockBack error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
@@ -1154,96 +1191,177 @@ const initiateStockBack = async (req, res) => {
 };
 
 const verifyStockBack = async (req, res) => {
-    const { transfer_id, otp } = req.body;
+    const { transfer_id, transfer_ids, otp, phoneKey } = req.body;
 
-    if (!transfer_id || !otp) {
+    let ids = [];
+    if (transfer_ids && Array.isArray(transfer_ids) && transfer_ids.length > 0) {
+        ids = transfer_ids;
+    } else if (transfer_id) {
+        ids = [transfer_id];
+    }
+
+    if (ids.length === 0 || !otp) {
         return res.status(400).json({ success: false, message: 'Missing fields.' });
     }
 
     try {
-        const transfer = await prisma.stockTransfer.findUnique({
-            where: { id: parseInt(transfer_id) },
+        const transfers = await prisma.stockTransfer.findMany({
+            where: { id: { in: ids.map(id => parseInt(id)) } },
             include: { inventory: true }
         });
 
-        if (!transfer) return res.status(404).json({ success: false, message: 'Transfer not found.' });
+        if (transfers.length === 0) return res.status(404).json({ success: false, message: 'Transfers not found.' });
 
-        const otpRecord = await prisma.otp.findFirst({
-            where: { phone: `back_${transfer_id}`, otp, purpose: 'stock_back', isUsed: false },
-            orderBy: { createdAt: 'desc' }
-        });
+        // Build the key that was used when the OTP was stored
+        // For bulk, we may only have one transfer_id from mobile but the key includes all IDs.
+        // Strategy: find by otp+purpose first, then validate it covers these transfer IDs.
+        let otpRecord = null;
+
+        if (phoneKey) {
+            // Explicit key provided (from web dashboard)
+            otpRecord = await prisma.otp.findFirst({
+                where: { phone: phoneKey, otp, purpose: 'stock_back', isUsed: false },
+                orderBy: { createdAt: 'desc' }
+            });
+        }
+
+        if (!otpRecord) {
+            // Try single-item key first
+            const singleKey = `back_${transfers[0].id}`;
+            otpRecord = await prisma.otp.findFirst({
+                where: { phone: singleKey, otp, purpose: 'stock_back', isUsed: false },
+                orderBy: { createdAt: 'desc' }
+            });
+        }
+
+        if (!otpRecord) {
+            // Try finding by OTP value alone (for bulk where mobile only sends one transfer_id)
+            // Pick the most recent unexpired stock_back OTP with this value
+            otpRecord = await prisma.otp.findFirst({
+                where: { 
+                    otp, 
+                    purpose: 'stock_back', 
+                    isUsed: false,
+                    expiresAt: { gt: new Date() }
+                },
+                orderBy: { createdAt: 'desc' }
+            });
+
+            // If found, verify that this OTP's phone key actually covers the given transfer_id(s)
+            if (otpRecord) {
+                const key = otpRecord.phone;
+                // bulk keys look like: back_bulk_1_2_3 or back_bulk_1_2_3_4...
+                // single keys look like: back_<id>
+                const isBulkKey = key.startsWith('back_bulk_');
+                const isSingleKey = key.startsWith('back_') && !isBulkKey;
+                
+                if (isSingleKey) {
+                    const keyId = parseInt(key.replace('back_', ''));
+                    if (!ids.map(id => parseInt(id)).includes(keyId)) {
+                        otpRecord = null; // Does not match
+                    }
+                }
+                // For bulk keys, we accept it since mobile only has partial info
+                // The OTP value being correct is sufficient for bulk verification
+            }
+        }
 
         if (!otpRecord || otpRecord.expiresAt < new Date()) {
             return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
         }
 
+        // For bulk OTPs, we need to get ALL transfer IDs covered by this OTP (not just what mobile sent)
+        const bulkKey = otpRecord.phone;
+        if (bulkKey.startsWith('back_bulk_')) {
+            // Extract IDs from key: back_bulk_1_2_3 → [1, 2, 3]
+            const keyPart = bulkKey.replace('back_bulk_', '');
+            const keyIds = keyPart.split('_').map(id => parseInt(id)).filter(id => !isNaN(id));
+            if (keyIds.length > ids.length) {
+                // Fetch all transfers for this OTP, not just the one the mobile sent
+                const allTransfers = await prisma.stockTransfer.findMany({
+                    where: { id: { in: keyIds } },
+                    include: { inventory: true }
+                });
+                if (allTransfers.length > 0) {
+                    // Replace transfers list with full set
+                    transfers.length = 0;
+                    transfers.push(...allTransfers);
+                }
+            }
+        }
+
         await prisma.$transaction(async (tx) => {
-            // 1. Update Inventory
-            if (transfer.status === 'transferred') {
-                if (transfer.to_type === 'Outlet') {
-                    // Move from target outlet back to origin outlet
+            for (const transfer of transfers) {
+                // 1. Update Inventory
+                if (transfer.status === 'transferred' || transfer.status === 'delivered') {
+                    if (transfer.to_type === 'Outlet') {
+                        // Move from target outlet back to origin outlet
+                        await tx.outletInventory.update({
+                            where: { id: transfer.inventory_id },
+                            data: { 
+                                outlet_id: transfer.from_id, 
+                                status: 'In Stock',
+                                updated_at: now()
+                            }
+                        });
+                    } else if (transfer.to_type === 'Delivery Officer') {
+                        // Mark as In Stock at origin outlet
+                        await tx.outletInventory.update({
+                            where: { id: transfer.inventory_id },
+                            data: { 
+                                status: 'In Stock',
+                                updated_at: now()
+                            }
+                        });
+                    }
+                } else if (transfer.status === 'pending') {
+                    // It was pending, just revert to In Stock
                     await tx.outletInventory.update({
                         where: { id: transfer.inventory_id },
                         data: { 
-                            outlet_id: transfer.from_id, 
                             status: 'In Stock',
-                            updated_at: now()   // ✅ explicit updated_at
-                        }
-                    });
-                } else if (transfer.to_type === 'Delivery Officer') {
-                    // Mark as In Stock at origin outlet
-                    await tx.outletInventory.update({
-                        where: { id: transfer.inventory_id },
-                        data: { 
-                            status: 'In Stock',
-                            updated_at: now()   // ✅ explicit updated_at
+                            updated_at: now()
                         }
                     });
                 }
-            } else if (transfer.status === 'pending') {
-                // Just revert 'Pending Transfer' to 'In Stock' at origin
-                await tx.outletInventory.update({
-                    where: { id: transfer.inventory_id },
+
+                // 2. Update StockTransfer status to 'Stock Back'
+                await tx.stockTransfer.update({
+                    where: { id: transfer.id },
                     data: { 
-                        status: 'In Stock',
-                        updated_at: now()   // ✅ explicit updated_at
+                        status: 'Stock Back',
+                        updated_at: now()
                     }
                 });
             }
-
-            // 2. Update StockTransfer status
-            await tx.stockTransfer.update({
-                where: { id: parseInt(transfer_id) },
-                data: { 
-                    status: 'Stock Back',
-                    updated_at: now()   // ✅ explicit updated_at
-                }
-            });
 
             // 3. Mark OTP as used
             await tx.otp.update({
                 where: { id: otpRecord.id },
                 data: { 
                     isUsed: true,
-                    updatedAt: now()   // ✅ explicit updatedAt
+                    updatedAt: now()
                 }
             });
         });
 
         const io = req.app.get('io');
         if (io) {
-            const giverRoom = transfer.to_type === 'Delivery Officer' ? `user_${transfer.to_id}` : `outlet_${transfer.to_id}`;
-            const receiverRoom = transfer.from_type === 'Delivery Officer' ? `user_${transfer.from_id}` : `outlet_${transfer.from_id}`;
+            const firstTransfer = transfers[0];
+            const giverRoom = firstTransfer.to_type === 'Delivery Officer' ? `user_${firstTransfer.to_id}` : `outlet_${firstTransfer.to_id}`;
+            const receiverRoom = firstTransfer.from_type === 'Delivery Officer' ? `user_${firstTransfer.from_id}` : `outlet_${firstTransfer.from_id}`;
 
-            io.to(giverRoom).emit('stock_back_completed', { transfer_id, success: true });
-            io.to(receiverRoom).emit('stock_back_completed', { transfer_id, success: true });
+            io.to(giverRoom).emit('stock_back_completed', { transfer_ids: ids, success: true });
+            io.to(receiverRoom).emit('stock_back_completed', { transfer_ids: ids, success: true });
         }
 
-        const giverName = transfer.to_type === 'Delivery Officer'
-            ? (await prisma.user.findUnique({ where: { id: transfer.to_id }, select: { full_name: true } }))?.full_name || `User ${transfer.to_id}`
-            : (await prisma.outlet.findUnique({ where: { id: transfer.to_id }, select: { name: true } }))?.name || `Outlet ${transfer.to_id}`;
+        const firstTransfer = transfers[0];
+        const giverName = firstTransfer.to_type === 'Delivery Officer'
+            ? (await prisma.user.findUnique({ where: { id: firstTransfer.to_id }, select: { full_name: true } }))?.full_name || `User ${firstTransfer.to_id}`
+            : (await prisma.outlet.findUnique({ where: { id: firstTransfer.to_id }, select: { name: true } }))?.name || `Outlet ${firstTransfer.to_id}`;
 
-        const logMsg = `Stock Back Verified: "${transfer.inventory?.product_name}" ${transfer.inventory?.imei_serial ? `(IMEI: ${transfer.inventory.imei_serial})` : ''} returned from ${transfer.to_type} ${giverName} to Outlet ${transfer.from_id}.`;
+        const itemsDetail = transfers.map(t => `${t.inventory?.product_name} (${t.inventory?.imei_serial || 'No IMEI'})`).join(', ');
+        const logMsg = `Stock Back Verified: ${transfers.length} item(s) returned from ${firstTransfer.to_type} ${giverName} to Outlet ${firstTransfer.from_id}. Items: ${itemsDetail}`;
 
         await logAction(req, 'STOCK_BACK_VERIFIED', logMsg, null, 'Inventory');
 

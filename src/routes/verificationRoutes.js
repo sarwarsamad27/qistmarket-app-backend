@@ -36,7 +36,8 @@ const {
   getDeliveredProductsList,
   updateVerificationMedia,
   replaceLocationPhoto,
-  getDashboardStats
+  getDashboardStats,
+  checkVerificationPerson
 } = require('../controllers/verificationController');
 
 // Get all verifications
@@ -51,6 +52,9 @@ router.get(
   authenticateJWT,
   getMyCustomersWithOrdersAndLedger
 );
+
+// Check purchaser/grantor CNIC or phone before saving
+router.post('/verification/check-person', authenticateJWT, checkVerificationPerson);
 
 // Start verification
 router.post('/verification/start', authenticateJWT, startVerification);

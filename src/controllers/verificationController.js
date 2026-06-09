@@ -249,12 +249,17 @@ const savePurchaserVerification = async (req, res) => {
   } = req.body;
 
   try {
-    // Check if blacklisted
-    const blacklistCheck = await checkBlacklistStatus(cnic_number);
-    if (blacklistCheck.isBlacklisted) {
+    try {
+      await assertPersonNotBlocked({
+        cnic: cnic_number,
+        phone: telephone_number,
+        excludeOrderId: order_id ? parseInt(order_id) : null,
+      });
+    } catch (blockErr) {
       return res.status(400).json({
         success: false,
-        message: `Yeh black list hay (${blacklistCheck.personType}). Aap is customer ke liye verification nahi kar sakte.`
+        message: blockErr.message,
+        code: blockErr.code,
       });
     }
 
@@ -457,21 +462,26 @@ const saveGrantorVerification = async (req, res) => {
   } = req.body;
 
   try {
-    // Check if blacklisted
-    const blacklistCheck = await checkBlacklistStatus(cnic_number);
-    if (blacklistCheck.isBlacklisted) {
-      return res.status(400).json({
-        success: false,
-        message: `Yeh black list hay (${blacklistCheck.personType}). Aap is shakhs ko grantor nahi bana sakte.`
-      });
-    }
-
     const verification = await prisma.verification.findUnique({
       where: { id: parseInt(verification_id) }
     });
 
     if (!verification) {
       return res.status(404).json({ success: false, error: { code: 404, message: 'Verification not found' } });
+    }
+
+    try {
+      await assertPersonNotBlocked({
+        cnic: cnic_number,
+        phone: telephone_number,
+        excludeOrderId: verification.order_id,
+      });
+    } catch (blockErr) {
+      return res.status(400).json({
+        success: false,
+        message: blockErr.message,
+        code: blockErr.code,
+      });
     }
 
     const grantorNum = parseInt(grantor_number);
@@ -1633,6 +1643,8 @@ const getMyAssignedOrdersCursorPaginated = (targetStatus) => async (req, res) =>
             status: true,
             start_time: true,
             end_time: true,
+            home_location_required: true,
+            home_location_verified: true,
           }
         },
       },
@@ -2721,18 +2733,221 @@ const replaceLocationPhoto = async (req, res) => {
   }
 };
 
+const checkVerificationPerson = async (req, res) => {
+  try {
+    const { cnic, phone, exclude_order_id } = req.body;
+    const cleanCnic = cnic?.trim() || null;
+    const cleanPhone = phone?.trim()?.replace(/\s+/g, '') || null;
+    const excludeOrderId = exclude_order_id ? parseInt(exclude_order_id) : null;
+
+    if (!cleanCnic && !cleanPhone) {
+      return res.status(400).json({ success: false, message: 'CNIC or phone is required' });
+    }
+
+    if (cleanCnic) {
+      const blacklistCheck = await checkBlacklistStatus(cleanCnic);
+      if (blacklistCheck.isBlacklisted) {
+        return res.json({
+          success: true,
+          exists: true,
+          isBlacklisted: true,
+          isBlocked: true,
+          personType: blacklistCheck.personType,
+          cnic: cleanCnic,
+          name: blacklistCheck.details?.name || null,
+          orderCount: 0,
+          orders: [],
+          message: `Yeh black list hay (${blacklistCheck.personType}). Aap is shakhs ki verification nahi kar sakte.`,
+        });
+      }
+    }
+
+    const ordersMap = new Map();
+
+    const addOrder = (order, role, personName, personCnic, isBlacklisted = false) => {
+      if (!order) return;
+      if (excludeOrderId && order.id === excludeOrderId) return;
+      ordersMap.set(order.id, {
+        id: order.id,
+        order_ref: order.order_ref,
+        status: order.status,
+        customer_name: order.customer_name || personName,
+        role,
+        cnic: personCnic || cleanCnic,
+        is_blacklisted: isBlacklisted,
+      });
+    };
+
+    if (cleanCnic) {
+      const purchaserMatches = await prisma.purchaserVerification.findMany({
+        where: { cnic_number: cleanCnic },
+        include: {
+          verification: {
+            include: {
+              order: {
+                select: {
+                  id: true,
+                  order_ref: true,
+                  status: true,
+                  customer_name: true,
+                },
+              },
+            },
+          },
+        },
+      });
+
+      purchaserMatches.forEach(pm => {
+        addOrder(pm.verification?.order, 'Purchaser', pm.name, pm.cnic_number, pm.is_blacklisted);
+      });
+
+      const grantorMatches = await prisma.grantorVerification.findMany({
+        where: { cnic_number: cleanCnic },
+        include: {
+          verification: {
+            include: {
+              order: {
+                select: {
+                  id: true,
+                  order_ref: true,
+                  status: true,
+                  customer_name: true,
+                },
+              },
+            },
+          },
+        },
+      });
+
+      grantorMatches.forEach(gm => {
+        addOrder(
+          gm.verification?.order,
+          `Guarantor ${gm.grantor_number || ''}`.trim(),
+          gm.name,
+          gm.cnic_number,
+          gm.is_blacklisted
+        );
+      });
+    }
+
+    if (cleanPhone && cleanPhone.length >= 11) {
+      const directOrders = await prisma.order.findMany({
+        where: { whatsapp_number: cleanPhone },
+        select: {
+          id: true,
+          order_ref: true,
+          status: true,
+          customer_name: true,
+        },
+      });
+      directOrders.forEach(o => addOrder(o, 'Order Contact', o.customer_name, cleanCnic));
+
+      const purchaserPhoneMatches = await prisma.purchaserVerification.findMany({
+        where: { telephone_number: cleanPhone },
+        include: {
+          verification: {
+            include: {
+              order: {
+                select: {
+                  id: true,
+                  order_ref: true,
+                  status: true,
+                  customer_name: true,
+                },
+              },
+            },
+          },
+        },
+      });
+      purchaserPhoneMatches.forEach(pm => {
+        addOrder(pm.verification?.order, 'Purchaser', pm.name, pm.cnic_number, pm.is_blacklisted);
+      });
+
+      const grantorPhoneMatches = await prisma.grantorVerification.findMany({
+        where: { telephone_number: cleanPhone },
+        include: {
+          verification: {
+            include: {
+              order: {
+                select: {
+                  id: true,
+                  order_ref: true,
+                  status: true,
+                  customer_name: true,
+                },
+              },
+            },
+          },
+        },
+      });
+      grantorPhoneMatches.forEach(gm => {
+        addOrder(
+          gm.verification?.order,
+          `Guarantor ${gm.grantor_number || ''}`.trim(),
+          gm.name,
+          gm.cnic_number,
+          gm.is_blacklisted
+        );
+      });
+    }
+
+    const orders = Array.from(ordersMap.values());
+    const exists = orders.length > 0;
+    const isBlacklisted = orders.some(o => o.is_blacklisted === true);
+    const profileCnic = cleanCnic || orders.find(o => o.cnic)?.cnic || null;
+    const firstOrder = orders[0];
+
+    let message = null;
+    if (exists) {
+      if (isBlacklisted) {
+        message = `Yeh shakhs black list mein hai (${firstOrder?.role || 'Customer'}) — ${orders.length} order(s) mili hain.`;
+      } else {
+        message = `Yeh shakhs pehle se customer hai (${firstOrder?.role || 'Customer'}) — ${orders.length} order(s) mili hain.`;
+      }
+    }
+
+    return res.json({
+      success: true,
+      exists,
+      isBlacklisted,
+      isBlocked: exists,
+      personType: firstOrder?.role || null,
+      cnic: profileCnic,
+      phone: cleanPhone,
+      name: firstOrder?.customer_name || null,
+      orderCount: orders.length,
+      orders,
+      message,
+    });
+  } catch (error) {
+    console.error('checkVerificationPerson error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+const assertPersonNotBlocked = async ({ cnic, phone, excludeOrderId }) => {
+  const mockRes = {
+    statusCode: 200,
+    body: null,
+    status(code) { this.statusCode = code; return this; },
+    json(data) { this.body = data; return this; },
+  };
+  await checkVerificationPerson(
+    { body: { cnic, phone, exclude_order_id: excludeOrderId } },
+    mockRes
+  );
+  if (mockRes.body?.isBlocked) {
+    const err = new Error(mockRes.body.message || 'Person is blocked');
+    err.code = mockRes.body.isBlacklisted ? 'BLACKLISTED' : 'EXISTING_CUSTOMER';
+    throw err;
+  }
+};
+
 const getVerificationDashboardStats = async (req, res) => {
   try {
     const { filter = 'today', startDate, endDate } = req.query;
     const userId = req.user?.id;
 
-    // Fetch officer info from DB (for bike_km_range, working_hours)
-    const officerInfo = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { bike_km_range: true, working_hours_start: true, working_hours_end: true }
-    });
-
-    // Trigger async ranking update
     updateVerificationRanking(userId, 'today').catch(err => console.error('Auto-ranking update error:', err));
     updateVerificationRanking(userId, 'month').catch(err => console.error('Auto-ranking update error:', err));
 
@@ -2755,152 +2970,228 @@ const getVerificationDashboardStats = async (req, res) => {
 
     const dateFilter = { gte: start, lte: end };
 
-    const baseWhere = {
-      updated_at: dateFilter,
-      assigned_to_user_id: userId
-    };
-
-    // Status counts
-    const statusGroups = await prisma.order.groupBy({
-      by: ['status'],
-      where: baseWhere,
-      _count: { id: true },
-    });
-
-    const statusCounts = statusGroups.reduce((acc, item) => {
-      acc[item.status] = item._count.id;
-      return acc;
-    }, {});
-
-    const totalOrders = Object.values(statusCounts).reduce((a, b) => a + b, 0);
-    const newCount = statusCounts['new'] || 0;
-    const pendingCount = statusCounts['pending'] || 0;
-    const inProgressCount = statusCounts['in_progress'] || 0;
-    const cancelledCount = statusCounts['cancelled'] || 0;
-    const completedCount = statusCounts['completed'] || 0;
-    const deliveredCount = statusCounts['delivered'] || 0;
-    const expiredCount = statusCounts['expired'] || 0;
-    const approvedCount = statusCounts['approved'] || 0;
-    const rejectedCount = statusCounts['rejected'] || 0;
-
-    // specific metrics
-    const homeLocationRequiredCount = await prisma.verification.count({
-        where: {
-            verification_officer_id: userId,
-            home_location_required: true,
-            home_location_verified: false,
-            updated_at: dateFilter
-        }
-    });
-
-    const topVisitDeadlineOrders = await prisma.order.findMany({
-        where: {
-            assigned_to_user_id: userId,
-            status: { in: ['pending', 'in_progress', 'new'] }
-        },
-        orderBy: { updated_at: 'asc' },
-        take: 5
-    });
-
-    // Yesterday for increment
-    const yesterdayStart = new Date(start); yesterdayStart.setDate(yesterdayStart.getDate() - 1);
-    const yesterdayEnd = new Date(end); yesterdayEnd.setDate(yesterdayEnd.getDate() - 1);
-
-    const yesterdayStatusGroups = await prisma.order.groupBy({
-      by: ['status'],
-      where: { ...baseWhere, updated_at: { gte: yesterdayStart, lte: yesterdayEnd } },
-      _count: { id: true },
-    });
-
-    const yesterdayCounts = yesterdayStatusGroups.reduce((acc, item) => {
-      acc[item.status] = item._count.id;
-      return acc;
-    }, {});
-
-    const calcIncrement = (curr, prev) => {
-      if (!prev || prev === 0) return curr > 0 ? 100 : 0;
-      return Math.round(((curr - prev) / prev) * 100);
-    };
-
-    const todayIncrement = {
-      total: calcIncrement(totalOrders, Object.values(yesterdayCounts).reduce((a, b) => a + b, 0)),
-      new: calcIncrement(newCount, yesterdayCounts['new']),
-      pending: calcIncrement(pendingCount, yesterdayCounts['pending']),
-      delivered: calcIncrement(deliveredCount, yesterdayCounts['delivered']),
-      approved: calcIncrement(approvedCount, yesterdayCounts['approved']),
-      cancelled: calcIncrement(cancelledCount, yesterdayCounts['cancelled']),
-      expired: calcIncrement(expiredCount, yesterdayCounts['expired']),
-      in_progress: calcIncrement(inProgressCount, yesterdayCounts['in_progress']),
-      completed: calcIncrement(completedCount, yesterdayCounts['completed']),
-      rejected: calcIncrement(rejectedCount, yesterdayCounts['rejected']),
-    };
-
-    // Rankings
-    const rankingPeriod = filter === 'custom' ? 'month' : filter;
-    
-    // Fetch all Verification Officers
-    const verificationOfficers = await prisma.user.findMany({
+    const myOrders = await prisma.order.findMany({
       where: {
-        role: {
-          name: { contains: 'Verification' }
-        }
+        assigned_to_user_id: userId,
+        updated_at: dateFilter,
       },
-      select: { id: true, full_name: true, username: true, image: true, outlet: { select: { name: true } } }
+      select: {
+        id: true,
+        status: true,
+        total_amount: true,
+        customer_id: true,
+        channel: true,
+        verification: {
+          select: { home_location_required: true },
+        },
+      },
     });
 
-    const rankings = await prisma.verificationRanking.findMany({
+    let assignedOrders = myOrders.length;
+    let pendingVerifications = 0;
+    let cancelledCount = 0;
+    let rejectedCount = 0;
+    let expiredCount = 0;
+    let approvedCount = 0;
+    let deliveredCount = 0;
+    let completedCount = 0;
+    let homeLocationRequired = 0;
+    let verificationSalesAmount = 0;
+    let customersDone = 0;
+    const channelMap = {};
+
+    myOrders.forEach(o => {
+      const status = o.status;
+      if (status === 'in_progress') pendingVerifications++;
+      if (status === 'cancelled') cancelledCount++;
+      if (status === 'rejected') rejectedCount++;
+      if (status === 'expired') expiredCount++;
+      if (status === 'approved') approvedCount++;
+      if (status === 'delivered') deliveredCount++;
+      if (status === 'completed') completedCount++;
+      if (o.verification?.home_location_required === true) homeLocationRequired++;
+
+      const isSuccess = ['completed', 'approved', 'delivered'].includes(status);
+      if (isSuccess) {
+        customersDone++;
+        verificationSalesAmount += (o.total_amount || 0);
+      }
+
+      const ch = (o.channel || 'unknown').toLowerCase();
+      if (!channelMap[ch]) channelMap[ch] = { total: 0, completed: 0, cancelled: 0 };
+      channelMap[ch].total += 1;
+      if (isSuccess) channelMap[ch].completed += 1;
+      if (status === 'cancelled') channelMap[ch].cancelled += 1;
+    });
+
+    const officerInfo = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { officer_profile_history: true },
+    });
+
+    let bikeRange = 0;
+    let totalWorkingSeconds = 0;
+
+    if (officerInfo?.officer_profile_history) {
+      const history = Array.isArray(officerInfo.officer_profile_history)
+        ? officerInfo.officer_profile_history
+        : [];
+
+      history.forEach(entry => {
+        const wsStart = entry.updated?.working_hours_start
+          ? new Date(entry.updated.working_hours_start)
+          : null;
+        const wsEnd = entry.updated?.working_hours_end
+          ? new Date(entry.updated.working_hours_end)
+          : null;
+
+        if (wsStart && wsStart >= start && wsStart <= end) {
+          if (wsEnd && wsEnd > wsStart) {
+            totalWorkingSeconds += (wsEnd - wsStart) / 1000;
+          }
+        }
+
+        const entryDate = new Date(entry.updatedAt);
+        if (entryDate >= start && entryDate <= end) {
+          const prevKm = Number(entry.previous?.bike_km_range || 0);
+          const updKm = Number(entry.updated?.bike_km_range || 0);
+          const delta = updKm - prevKm;
+          if (delta > 0) bikeRange += delta;
+        }
+      });
+    }
+
+    const workingHoursNum = totalWorkingSeconds > 0
+      ? Number((totalWorkingSeconds / 3600).toFixed(2))
+      : 0;
+
+    const rankingPeriod = filter === 'custom' ? 'month' : filter;
+
+    const allVerificationOfficers = await prisma.user.findMany({
+      where: { role: { name: { contains: 'Verification' } } },
+      select: { id: true, username: true, full_name: true, outlet: { select: { name: true } } },
+    });
+
+    const allOfficerIds = allVerificationOfficers.map(o => o.id);
+
+    const allOfficerOrders = await prisma.order.findMany({
       where: {
+        assigned_to_user_id: { in: allOfficerIds },
+        updated_at: dateFilter,
+      },
+      select: {
+        assigned_to_user_id: true,
+        status: true,
+        total_amount: true,
+        customer_id: true,
+      },
+    });
+
+    const dbRankings = await prisma.verificationRanking.findMany({
+      where: {
+        officer_id: { in: allOfficerIds },
         period: rankingPeriod,
         month: rankingPeriod === 'month' ? nowDt.getMonth() + 1 : 0,
         year: rankingPeriod === 'month' ? nowDt.getFullYear() : 0,
+      },
+      include: { user: { include: { outlet: true } } },
+    });
+    const dbRankingMap = {};
+    dbRankings.forEach(r => { dbRankingMap[r.officer_id] = r; });
+
+    const liveMap = {};
+    allOfficerOrders.forEach(o => {
+      const oid = o.assigned_to_user_id;
+      if (!liveMap[oid]) {
+        liveMap[oid] = {
+          completed: 0,
+          approved: 0,
+          delivered: 0,
+          cancelled: 0,
+          expired: 0,
+          totalSales: 0,
+          uniqueCustomers: new Set(),
+          hasData: false,
+        };
       }
+      liveMap[oid].hasData = true;
+      const status = o.status;
+      if (status === 'completed') liveMap[oid].completed++;
+      if (status === 'approved') liveMap[oid].approved++;
+      if (status === 'delivered') liveMap[oid].delivered++;
+      if (['completed', 'approved', 'delivered'].includes(status)) {
+        liveMap[oid].totalSales += (o.total_amount || 0);
+        if (o.customer_id) liveMap[oid].uniqueCustomers.add(o.customer_id);
+      }
+      if (status === 'cancelled') liveMap[oid].cancelled++;
+      if (status === 'expired') liveMap[oid].expired++;
     });
 
-    const rankingMap = rankings.reduce((acc, r) => { acc[r.officer_id] = r; return acc; }, {});
+    let officerRankData = allVerificationOfficers.map(officer => {
+      const live = liveMap[officer.id];
+      const db = dbRankingMap[officer.id];
 
-    let officerRanking = verificationOfficers.map(officer => {
-      const rankRecord = rankingMap[officer.id];
-      const score = rankRecord ? rankRecord.score : 0;
+      const completed = live?.completed ?? (db?.completed_customers || 0);
+      const approved = live?.approved ?? 0;
+      const delivered = live?.delivered ?? (db?.delivered_customers || 0);
+      const cancelled = live?.cancelled ?? (db?.cancelled_customers || 0);
+      const expired = live?.expired ?? (db?.expired_customers || 0);
+      const uniqueCustomers = live?.hasData
+        ? live.uniqueCustomers.size
+        : (db?.unique_customers || 0);
+      const totalSales = live?.hasData
+        ? live.totalSales
+        : (db?.total_sales || 0);
+      const score = (completed * 10) + (approved * 5) + (delivered * 5) - (cancelled * 2) - (expired * 3);
+
       let league = 'Bronze';
-      if (score >= 1500) league = 'Gold';
-      else if (score >= 1000) league = 'Silver';
+      if (score >= 300) league = 'Diamond';
+      else if (score >= 100) league = 'Gold';
+      else if (score >= 30) league = 'Silver';
+
+      const outletName = officer.outlet?.name ||
+        db?.user?.outlet?.name ||
+        'Main';
 
       return {
-        userId: officer.id,
-        name: officer.full_name,
-        username: officer.username,
-        image: officer.image,
-        outletName: officer.outlet?.name || 'Main Outlet',
-        uniqueCustomers: rankRecord ? rankRecord.unique_customers : 0,
-        delivered: rankRecord ? rankRecord.delivered_customers : 0,
-        completed: rankRecord ? rankRecord.completed_customers : 0,
-        cancelled: rankRecord ? rankRecord.cancelled_customers : 0,
-        expired: rankRecord ? rankRecord.expired_customers : 0,
-        totalSales: rankRecord ? rankRecord.total_sales : 0,
-        score: score,
-        trend: rankRecord ? rankRecord.trend : 0,
-        league: league
+        officerId: officer.id,
+        name: officer.username || officer.full_name || 'Officer',
+        outletName,
+        score,
+        league,
+        uniqueCustomers,
+        totalSales,
+        completed,
+        approved,
+        delivered,
+        isMe: officer.id === userId,
       };
     });
 
-    officerRanking.sort((a, b) => b.score - a.score);
-    officerRanking = officerRanking.map((r, index) => ({ ...r, rank: index + 1 }));
+    officerRankData.sort((a, b) => b.uniqueCustomers - a.uniqueCustomers || b.score - a.score);
 
-    // Channel stats
-    const channelGroups = await prisma.order.groupBy({
-      by: ['channel', 'status'],
-      where: baseWhere,
-      _count: { id: true },
+    let currentRank = 1;
+    const officerRanking = officerRankData.map((r, i) => {
+      if (i > 0 && r.uniqueCustomers < officerRankData[i - 1].uniqueCustomers) currentRank = i + 1;
+      return {
+        rank: currentRank,
+        name: r.name,
+        outletName: r.outletName,
+        score: r.score,
+        league: r.league,
+        uniqueCustomers: r.uniqueCustomers,
+        totalSales: r.totalSales,
+        completed: r.completed,
+        approved: r.approved,
+        delivered: r.delivered,
+        isMe: r.isMe,
+      };
     });
 
-    const channelMap = {};
-    channelGroups.forEach(item => {
-      const ch = (item.channel || 'unknown').toLowerCase();
-      if (!channelMap[ch]) channelMap[ch] = { total: 0, completed: 0, cancelled: 0 };
-      channelMap[ch].total += item._count.id;
-      if (item.status === 'completed' || item.status === 'approved') channelMap[ch].completed += item._count.id;
-      if (item.status === 'cancelled') channelMap[ch].cancelled += item._count.id;
-    });
+    const monthlyTarget = Number(process.env.VERIFICATION_TARGET_AMOUNT || 500000);
+    const customerTarget = Number(process.env.VERIFICATION_TARGET_CUSTOMERS || 50);
+    const remainingAmount = Math.max(0, monthlyTarget - verificationSalesAmount);
+    const remainingCustomers = Math.max(0, customerTarget - customersDone);
 
     const buildChannelStats = (names) => {
       const combined = { total: 0, completed: 0, cancelled: 0 };
@@ -2912,13 +3203,17 @@ const getVerificationDashboardStats = async (req, res) => {
           combined.cancelled += data.cancelled;
         }
       });
-      combined.successRate = combined.total > 0 ? Math.round((combined.completed / combined.total) * 100) : 0;
-      combined.cancelRate = combined.total > 0 ? Math.round((combined.cancelled / combined.total) * 100) : 0;
+      combined.successRate = combined.total > 0
+        ? Math.round((combined.completed / combined.total) * 100)
+        : 0;
+      combined.cancelRate = combined.total > 0
+        ? Math.round((combined.cancelled / combined.total) * 100)
+        : 0;
       return combined;
     };
 
-    const channelStats = {
-      referral: buildChannelStats(['referral']),
+    const sourceSuccessRate = {
+      referral: buildChannelStats(['referral', 'outlet referral', 'outlet']),
       call: buildChannelStats(['call']),
       whatsapp: buildChannelStats(['whatsapp', 'whats_app', 'whats app']),
       website: buildChannelStats(['website']),
@@ -2927,36 +3222,39 @@ const getVerificationDashboardStats = async (req, res) => {
     return res.status(200).json({
       success: true,
       data: {
-        filter,
-        dateRange: { start, end },
-        totalOrders,
-        statusCounts: {
-          new: newCount,
-          pending: pendingCount,
-          in_progress: inProgressCount,
-          cancelled: cancelledCount,
-          completed: completedCount,
-          delivered: deliveredCount,
-          expired: expiredCount,
-          approved: approvedCount,
-          rejected: rejectedCount,
+        assignedOrders,
+        homeLocationRequired,
+        pendingVerifications,
+        cancelledCount,
+        approvedCount,
+        deliveredCount,
+        rejectedCount,
+        completedCount,
+        expiredCount,
+        bikeRange,
+        workingHours: workingHoursNum,
+        customersDone,
+        verificationSalesAmount,
+        officerRanking,
+        targetTracking: {
+          achievedAmount: verificationSalesAmount,
+          targetAmount: monthlyTarget,
+          remainingAmount,
+          achievedCustomers: customersDone,
+          targetCustomers: customerTarget,
+          remainingCustomers,
         },
-        bikeRange: officerInfo?.bike_km_range || 0,
-        workingHours: `${officerInfo?.working_hours_start || '09:00'} - ${officerInfo?.working_hours_end || '18:00'}`,
-        homeLocationRequiredCount,
-        topVisitDeadlineOrders,
-        todayIncrement,
-        channelStats,
-        officerRanking
+        sourceSuccessRate,
       },
     });
   } catch (error) {
-    console.error('getDashboardStats error:', error);
+    console.error('getVerificationDashboardStats error:', error);
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
 
 module.exports = {
+  checkVerificationPerson,
   getVerificationDashboardStats,
   getVerifications,
   startVerification,

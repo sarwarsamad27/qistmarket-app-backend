@@ -177,10 +177,16 @@ const updateOfficerProfile = async (req, res) => {
       return res.status(404).json({ success: false, error: { code: 404, message: 'User not found' } });
     }
 
-    // Parse existing history from JSON string
     let existingHistory = [];
     if (currentUser.officer_profile_history) {
-      existingHistory = currentUser.officer_profile_history;
+      try {
+        existingHistory = typeof currentUser.officer_profile_history === 'string' 
+          ? JSON.parse(currentUser.officer_profile_history) 
+          : currentUser.officer_profile_history;
+      } catch (e) {
+        existingHistory = [];
+      }
+      if (!Array.isArray(existingHistory)) existingHistory = [];
     }
 
     const updatedBikeKmRange =

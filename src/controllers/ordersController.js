@@ -906,6 +906,10 @@ const getOrders = async (req, res) => {
           where.assigned_to = { username: { contains: value } };
         } else if (key === 'created_by') {
           where.created_by = { username: { contains: value } };
+        } else if (key === 'delivery_officer') {
+          where.delivery_officer = { username: { contains: value } };
+        } else if (key === 'recovery_officer') {
+          where.recovery_officer = { username: { contains: value } };
         } else if (key === 'status') {
           const statusList = value.split(',').map(s => s.trim());
           if (statusList.length > 1) {
@@ -1017,6 +1021,10 @@ const getOrdersWithPagination = async (req, res) => {
           baseWhere.assigned_to = { username: value };
         } else if (key === 'created_by') {
           baseWhere.created_by = { username: value };
+        } else if (key === 'delivery_officer') {
+          baseWhere.delivery_officer = { username: value };
+        } else if (key === 'recovery_officer') {
+          baseWhere.recovery_officer = { username: value };
         } else if (key === 'status') {
           const statusList = value.split(',').map(s => s.trim());
           if (statusList.length > 1) {
@@ -1703,6 +1711,8 @@ const getMyDeliveryOrdersWithPagination = async (req, res) => {
             status: true,
             start_time: true,
             end_time: true,
+            home_location_required: true,
+            home_location_verified: true,
             purchaser: {
               select: {
                 id: true,
