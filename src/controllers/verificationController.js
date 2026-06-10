@@ -2936,9 +2936,10 @@ const assertPersonNotBlocked = async ({ cnic, phone, excludeOrderId }) => {
     { body: { cnic, phone, exclude_order_id: excludeOrderId } },
     mockRes
   );
-  if (mockRes.body?.isBlocked) {
-    const err = new Error(mockRes.body.message || 'Person is blocked');
-    err.code = mockRes.body.isBlacklisted ? 'BLACKLISTED' : 'EXISTING_CUSTOMER';
+  // ✅ Sirf blacklisted pe block karo — existing customer allow hai
+  if (mockRes.body?.isBlacklisted) {
+    const err = new Error(mockRes.body.message || 'Person is blacklisted');
+    err.code = 'BLACKLISTED';
     throw err;
   }
 };

@@ -13,12 +13,13 @@ const transporter = nodemailer.createTransport({
     }
   });
 
-const sendEmail = async ({ to, subject, html }) => {
+const sendEmail = async ({ to, subject, html, attachments }) => {
   await transporter.sendMail({
     from: `"Qist Market" <${process.env.FROM_EMAIL}>`,
     to,
     subject,
     html,
+    attachments: attachments || [],
   });
 };
 

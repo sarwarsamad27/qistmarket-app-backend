@@ -133,9 +133,9 @@ const sendWebLoginOTP = async (req, res) => {
   try {
     let whereCondition = {};
     if (isPhone) {
-      whereCondition = { phone: identifier, role_id: { in: [4, 5, 6, 7, 8] } };
+      whereCondition = { phone: identifier, role_id: { in: [4, 5, 6, 7, 8, 10] } };
     } else {
-      whereCondition = { email: identifier.toLowerCase(), role_id: { in: [4, 5, 6, 7, 8] } };
+      whereCondition = { email: identifier.toLowerCase(), role_id: { in: [4, 5, 6, 7, 8, 10] } };
     }
 
     const user = await prisma.user.findFirst({ where: whereCondition });
@@ -251,9 +251,9 @@ const verifyWebLoginOTP = async (req, res) => {
 
     let whereCondition = {};
     if (isPhone) {
-      whereCondition = { phone: identifier, role_id: { in: [4, 5, 6, 7, 8] } };
+      whereCondition = { phone: identifier, role_id: { in: [4, 5, 6, 7, 8, 10] } };
     } else if (isEmail) {
-      whereCondition = { email: identifier.toLowerCase(), role_id: { in: [4, 5, 6, 7, 8] } };
+      whereCondition = { email: identifier.toLowerCase(), role_id: { in: [4, 5, 6, 7, 8, 10] } };
     }
 
     const user = await prisma.user.findFirst({

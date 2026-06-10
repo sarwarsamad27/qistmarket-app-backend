@@ -253,6 +253,7 @@ model Outlet {
   vendorPurchaseReturns VendorPurchaseReturn[]
   vendors          Vendor[]
   auto_assignment_config Json?
+  employees        Employee[]
 
   @@map("outlets")
 }
@@ -1265,4 +1266,201 @@ model RecoveryRanking {
 
   @@unique([officer_id, period, month, year])
   @@map("recovery_rankings")
+}
+
+// ========== HR / Employee Portal ==========
+
+model Employee {
+  id                    Int       @id @default(autoincrement())
+  employee_id           String    @unique
+  full_name             String
+  username              String    @unique
+  password_hash         String
+  portal_active         Boolean   @default(true)
+  qr_code               String?   @db.Text
+  cnic                  String?
+  phone                 String?
+  email                 String?
+  address               String?   @db.Text
+  emergency_contact     String?
+  emergency_phone       String?
+  qualification         String?   @db.Text
+  experience            String?   @db.Text
+  date_of_birth         DateTime?
+  date_of_joining       DateTime?
+  department            String?
+  designation           String?
+  outlet_id             Int?
+  annual_leave_total    Float     @default(12)
+  annual_leave_used     Float     @default(0)
+  sick_leave_total      Float     @default(6)
+  sick_leave_used       Float     @default(0)
+  emergency_leave_total Float     @default(3)
+  emergency_leave_used  Float     @default(0)
+  unpaid_leave_used     Float     @default(0)
+  status                String    @default("active")
+  created_at            DateTime  @default(now())
+  updated_at            DateTime  @updatedAt
+  outlet                Outlet?   @relation(fields: [outlet_id], references: [id])
+  attendances           EmployeeAttendance[]
+  leave_requests        LeaveRequest[]
+  payroll_slips         PayrollSlip[]
+  loans                 EmployeeLoan[]
+  timeline_events       EmploymentEvent[]
+  documents             EmployeeDocument[]
+  notifications         EmployeeNotification[]
+  performance_records   EmployeePerformance[]
+  login_attempts        EmployeeLoginAttempt?
+
+  @@index([outlet_id])
+  @@index([department])
+  @@map("employees")
+}
+
+model EmployeeLoginAttempt {
+  id              Int       @id @default(autoincrement())
+  employee_id     Int       @unique
+  failed_attempts Int       @default(0)
+  locked_until    DateTime?
+  updated_at      DateTime  @updatedAt
+  employee        Employee  @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+
+  @@map("employee_login_attempts")
+}
+
+model EmployeeAttendance {
+  id           Int      @id @default(autoincrement())
+  employee_id  Int
+  date         DateTime @db.Date
+  status       String
+  check_in     String?
+  check_out    String?
+  overtime_hrs Float    @default(0)
+  missed_punch Boolean  @default(false)
+  notes        String?
+  created_at   DateTime @default(now())
+  employee     Employee @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+
+  @@unique([employee_id, date])
+  @@index([employee_id])
+  @@map("employee_attendances")
+}
+
+model LeaveRequest {
+  id               Int      @id @default(autoincrement())
+  employee_id      Int
+  leave_type       String
+  from_date        DateTime @db.Date
+  to_date          DateTime @db.Date
+  days             Float
+  reason           String   @db.Text
+  status           String   @default("pending")
+  rejection_reason String?  @db.Text
+  created_at       DateTime @default(now())
+  updated_at       DateTime @updatedAt
+  employee         Employee @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+
+  @@index([employee_id])
+  @@map("leave_requests")
+}
+
+model PayrollSlip {
+  id           Int       @id @default(autoincrement())
+  employee_id  Int
+  month        Int
+  year         Int
+  basic_salary Float
+  allowances   Float     @default(0)
+  bonuses      Float     @default(0)
+  commissions  Float     @default(0)
+  deductions   Float     @default(0)
+  net_payable  Float
+  status       String    @default("pending")
+  paid_date    DateTime?
+  slip_data    Json?
+  created_at   DateTime  @default(now())
+  employee     Employee  @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+
+  @@unique([employee_id, month, year])
+  @@index([employee_id])
+  @@map("payroll_slips")
+}
+
+model EmployeeLoan {
+  id                  Int      @id @default(autoincrement())
+  employee_id         Int
+  loan_type           String
+  total_amount        Float
+  deducted_amount     Float    @default(0)
+  monthly_installment Float
+  start_date          DateTime @db.Date
+  status              String   @default("active")
+  schedule_json       Json?
+  created_at          DateTime @default(now())
+  employee            Employee @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+
+  @@index([employee_id])
+  @@map("employee_loans")
+}
+
+model EmploymentEvent {
+  id           Int      @id @default(autoincrement())
+  employee_id  Int
+  event_type   String
+  title        String
+  description  String?  @db.Text
+  event_date   DateTime
+  metadata     Json?
+  document_url String?
+  created_at   DateTime @default(now())
+  employee     Employee @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+
+  @@index([employee_id])
+  @@map("employment_events")
+}
+
+model EmployeeDocument {
+  id          Int      @id @default(autoincrement())
+  employee_id Int
+  doc_type    String
+  title       String
+  file_url    String?
+  created_at  DateTime @default(now())
+  employee    Employee @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+
+  @@index([employee_id])
+  @@map("employee_documents")
+}
+
+model EmployeeNotification {
+  id          Int      @id @default(autoincrement())
+  employee_id Int
+  title       String
+  message     String   @db.Text
+  type        String
+  is_read     Boolean  @default(false)
+  created_at  DateTime @default(now())
+  employee    Employee @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+
+  @@index([employee_id])
+  @@map("employee_notifications")
+}
+
+model EmployeePerformance {
+  id               Int      @id @default(autoincrement())
+  employee_id      Int
+  month            Int
+  year             Int
+  kpi_score        Float    @default(0)
+  attendance_score Float    @default(0)
+  recovery_pct     Float?   @default(0)
+  targets          Json?
+  achieved         Json?
+  team_rank        Int?
+  created_at       DateTime @default(now())
+  employee         Employee @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+
+  @@unique([employee_id, month, year])
+  @@index([employee_id])
+  @@map("employee_performance")
 }

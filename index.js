@@ -12,6 +12,8 @@ const jwt = require('jsonwebtoken');
 // ────────────────────────────────────────────────
 // Route Imports
 // ────────────────────────────────────────────────
+const hrRoutes = require('./src/routes/hrRoutes');
+const employeePortalRoutes = require('./src/routes/employeePortalRoutes');
 const smartPayWebhookRoutes = require('./src/routes/smartPayWebhookRoutes');
 const ledgerRoutes = require('./src/routes/ledgerRoutes');
 const appVersionRoutes = require('./src/routes/appVersionRoutes');
@@ -443,6 +445,8 @@ app.get('/', (req, res) => {
 // ────────────────────────────────────────────────
 // Routes
 // ────────────────────────────────────────────────
+app.use('/api/hr', hrRoutes);
+app.use('/api', employeePortalRoutes);
 app.use('/api/smartpay/webhook', smartPayWebhookRoutes);
 app.use('/ledger', ledgerRoutes);
 app.use('/api/app-version', appVersionRoutes);   // Public ledger routes — no auth required, must be first!

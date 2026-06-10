@@ -34,6 +34,7 @@
     "node-fetch": "^3.3.2",
     "nodemailer": "^7.0.5",
     "nodemon": "^3.1.10",
+    "pdfkit": "^0.19.0",
     "pg": "^8.16.3",
     "puppeteer": "^24.40.0",
     "qrcode": "^1.5.4",
