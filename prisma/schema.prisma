@@ -513,6 +513,8 @@ model Verification {
   updated_at              DateTime                  @updatedAt
   home_location_required  Boolean                   @default(false)
   home_location_verified  Boolean                   @default(false)
+  location_vo_sent        Boolean                   @default(false)
+  location_do_sent        Boolean                   @default(false)
   verification_feedback   String?                   @db.Text
   grantors                GrantorVerification[]
   locations               LocationTracking[]

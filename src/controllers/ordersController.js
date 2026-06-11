@@ -931,8 +931,8 @@ const getOrders = async (req, res) => {
     const include = {
       created_by: { select: { username: true } },
       assigned_to: { select: { username: true, full_name: true } },
-      delivery_officer: { select: { username: true, full_name: true } },
-      recovery_officer: { select: { username: true, full_name: true } },
+        delivery_officer: { select: { id: true, username: true, full_name: true } },
+        recovery_officer: { select: { id: true, username: true, full_name: true } },
       productHistories: {
         include: {
           changed_by: { select: { username: true, full_name: true } }
@@ -1713,6 +1713,8 @@ const getMyDeliveryOrdersWithPagination = async (req, res) => {
             end_time: true,
             home_location_required: true,
             home_location_verified: true,
+            location_vo_sent: true,
+            location_do_sent: true,
             purchaser: {
               select: {
                 id: true,
@@ -1811,8 +1813,8 @@ const getOrderById = async (req, res) => {
       include: {
         created_by: { select: { username: true, full_name: true } },
         assigned_to: { select: { username: true, full_name: true } },
-        delivery_officer: { select: { username: true, full_name: true } },
-        recovery_officer: { select: { username: true, full_name: true } },
+        delivery_officer: { select: { username: true, full_name: true, id: true } },
+        recovery_officer: { select: { username: true, full_name: true, id: true } },
         productHistories: {
           include: {
             changed_by: { select: { username: true, full_name: true } }

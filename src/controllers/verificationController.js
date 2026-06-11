@@ -1267,6 +1267,8 @@ const getVerificationByOrderId = async (req, res) => {
             house_no: true,
             street: true,
             zone: true,
+            assigned_to: true,
+            assigned_to_user_id: true,
             alternate_contact: true,
             channel: true,
             created_at: true,
@@ -1276,8 +1278,8 @@ const getVerificationByOrderId = async (req, res) => {
             postponed_feedback: true,
             created_by: { select: { username: true, full_name: true } },
             assigned_to: { select: { username: true, full_name: true } },
-            delivery_officer: { select: { username: true, full_name: true } },
-            recovery_officer: { select: { username: true, full_name: true } },
+            delivery_officer: { select: { username: true, full_name: true, id: true } },
+            recovery_officer: { select: { username: true, full_name: true, id: true } },
             statusHistories: {
               include: {
                 user: { select: { username: true, full_name: true } }
@@ -2113,6 +2115,8 @@ const sendToVOForLocation = async (req, res) => {
   const { verification_id } = req.params;
   const { officer_id } = req.body;
 
+  console.log('sendToVOForLocation called with:', { verification_id, officer_id });
+
   try {
     const verification = await prisma.verification.findUnique({
       where: { id: parseInt(verification_id) },
@@ -2128,6 +2132,7 @@ const sendToVOForLocation = async (req, res) => {
       data: {
         verification_officer_id: parseInt(officer_id),
         status: 'location_capture_pending',
+        location_vo_sent: true,
         updated_at: now()   // ✅ explicit
       }
     });
@@ -2153,6 +2158,8 @@ const sendToDOForLocation = async (req, res) => {
   const { verification_id } = req.params;
   const { officer_id } = req.body;
 
+  console.log('sendToDOForLocation called with:', { verification_id, officer_id });
+
   try {
     const verification = await prisma.verification.findUnique({
       where: { id: parseInt(verification_id) },
@@ -2169,7 +2176,8 @@ const sendToDOForLocation = async (req, res) => {
       data: {
         verification_officer_id: parseInt(officer_id),
         status: 'location_capture_pending',
-        updated_at: now()   // ✅ explicit
+        location_do_sent: true,
+        updated_at: now()
       }
     });
 
@@ -2246,14 +2254,23 @@ const updateLocationVerified = async (req, res) => {
     const savedPhotos = await Promise.all(photoPromises);
 
     // Update verification flags
+    const updateData = {
+      home_location_verified: true,
+      home_location_required: false,
+      status: 'location_captured',
+      updated_at: now()
+    };
+
+    const userRole = (req.user?.role || '').toLowerCase();
+    if (userRole === 'verification officer') {
+      updateData.location_vo_sent = false;
+    } else if (userRole === 'delivery agent') {
+      updateData.location_do_sent = false;
+    }
+
     await prisma.verification.update({
       where: { id: parseInt(verification_id) },
-      data: {
-        home_location_verified: true,
-        home_location_required: false,
-        status: 'location_captured',
-        updated_at: now()   // ✅ explicit
-      }
+      data: updateData
     });
 
     // Get location with photos

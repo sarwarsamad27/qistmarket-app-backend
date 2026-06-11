@@ -63,7 +63,7 @@ const recordBiometricAttendance = async (req, res) => {
 const getBiometricDeviceStatus = async (req, res) => {
   return res.json({
     success: true,
-    device: { ip: BIOMETRIC_DEVICE_IP, port: BIOMETRIC_DEVICE_PORT, connected: true, model: 'ZKTeco BioTime 8.0' },
+    device: { ip: BIOMETRIC_DEVICE_IP, port: BIOMETRIC_DEVICE_PORT, connected: false, model: '-' },
     recentLogs: biometricDeviceLog.slice(-50),
   });
 };

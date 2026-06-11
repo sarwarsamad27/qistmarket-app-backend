@@ -423,30 +423,39 @@ const getDashboardStats = async (req, res) => {
 const getGlobalCashInHand = async (req, res) => {
     try {
         const entries = await prisma.cashInHand.findMany({
-            where: { status: 'pending' },
+            where: {
+                status: 'pending',
+                ...(req.user?.outlet_id ? { officer: { outlet_id: req.user.outlet_id } } : {}),
+            },
             include: {
-                officer: { select: { full_name: true, phone: true } },
-                outlet: { select: { name: true } }
+                officer: {
+                    select: {
+                        full_name: true,
+                        username: true,
+                        phone: true,
+                        role: { select: { name: true } },
+                    }
+                },
+                outlet: { select: { name: true, code: true } },
             },
             orderBy: { created_at: 'desc' }
         });
 
-        // Hide product/customer details and calculate balance
-        const formattedEntries = entries.map(entry => {
-            const submittedAmt = entry.submitted_amount || 0;
-            return {
-                id: entry.id,
-                amount: entry.amount,
-                submitted_amount: submittedAmt,
-                balance: entry.amount - submittedAmt,
-                status: entry.status,
-                created_at: entry.created_at,
-                cash_type: entry.cash_type || 'Advance amount payment',
-                payment_method: entry.payment_method,
-                officer: entry.officer,
-                outlet: entry.outlet
-            };
-        });
+        const formattedEntries = entries.map(entry => ({
+            id: entry.id,
+            amount: entry.amount,
+            balance: entry.amount - (entry.submitted_amount || 0),
+            cash_type: entry.cash_type || 'Advance amount payment',
+            payment_method: entry.payment_method,
+            status: entry.status,
+            officer: {
+                full_name: entry.officer.full_name,
+                username: entry.officer.username,
+                phone: entry.officer.phone,
+                role: entry.officer.role?.name || 'N/A',
+            },
+            outlet: entry.outlet ? { name: entry.outlet.name, code: entry.outlet.code } : null,
+        }));
 
         return res.status(200).json({
             success: true,
@@ -570,14 +579,14 @@ const getOutletCashHistory = async (req, res) => {
                 where,
                 skip,
                 take,
-                include: {
-                    cash_in_hand: {
                         include: {
-                            officer: { select: { full_name: true, phone: true } },
-                            order: { select: { order_ref: true } }
-                        }
-                    }
-                },
+                            cash_in_hand: {
+                                include: {
+                                    officer: { select: { full_name: true, username: true, phone: true, image: true } },
+                                    order: { select: { order_ref: true } }
+                                }
+                            }
+                        },
                 orderBy: { submission_date: 'desc' }
             })
         ]);
