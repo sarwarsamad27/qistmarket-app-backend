@@ -177,6 +177,25 @@ const applyLeave = async (req, res) => {
     const to = new Date(to_date);
     const days = Math.ceil((to - from) / (1000 * 60 * 60 * 24)) + 1;
 
+    if (leave_type !== 'unpaid') {
+      const employee = await prisma.employee.findUnique({ where: { id: req.employee.id } });
+      const balanceMap = {
+        annual: employee.annual_leave_total - employee.annual_leave_used,
+        sick: employee.sick_leave_total - employee.sick_leave_used,
+        emergency: employee.emergency_leave_total - employee.emergency_leave_used,
+      };
+      const remaining = balanceMap[leave_type];
+      if (remaining == null) {
+        return res.status(400).json({ success: false, message: 'Invalid leave type.' });
+      }
+      if (remaining < 1) {
+        return res.status(400).json({ success: false, message: `No ${leave_type} leave remaining.` });
+      }
+      if (days > remaining) {
+        return res.status(400).json({ success: false, message: `Only ${remaining} ${leave_type} leave day(s) remaining, but you requested ${days}.` });
+      }
+    }
+
     const request = await prisma.leaveRequest.create({
       data: {
         employee_id: req.employee.id,
