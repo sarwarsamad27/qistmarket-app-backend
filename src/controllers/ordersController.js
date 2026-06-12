@@ -938,8 +938,8 @@ const getOrders = async (req, res) => {
           changed_by: { select: { username: true, full_name: true } }
         },
         orderBy: { changed_at: 'desc' }
-      }
-    };
+  }
+};
 
     const orders = await prisma.order.findMany({
       where,
@@ -1413,8 +1413,8 @@ const getCsrDashboardStats = async (req, res) => {
         customers: {
             current: Array.from({ length: 31 }, (_, i) => thisMonthDaily[i + 1]?.customers || 0),
             previous: Array.from({ length: 31 }, (_, i) => lastMonthDaily[i + 1]?.customers || 0)
-        }
-    };
+  }
+};
 
     // 5. Outlet Performance
     const outletStats = await prisma.order.groupBy({
@@ -3507,8 +3507,8 @@ const createConvertedSale = async (req, res) => {
                             const { id: pId, verification_location_id: pLid, uploaded_at: pAt, ...cleanP } = p;
                             return cleanP;
                         })
-                    }
-                };
+  }
+};
             })
         } : undefined
       }
@@ -3565,18 +3565,48 @@ const createConvertedSale = async (req, res) => {
   }
 };
 
+const updateOrderStatus = async (req, res) => {
+  const { id } = req.params;
+  const { status, remarks } = req.body;
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(id) },
+      select: { id: true, order_ref: true, status: true },
+    });
+
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    const oldStatus = order.status;
+
+    const updatedOrder = await prisma.order.update({
+      where: { id: order.id },
+      data: { status, updated_at: new Date() },
+    });
+
+    await logOrderStatusChange(updatedOrder.id, oldStatus, status, req.user, remarks || `Status changed from ${oldStatus} to ${status} by Super Admin`);
+
+    return res.status(200).json({ success: true, message: `Order status updated from ${oldStatus} to ${status}`, data: { status } });
+  } catch (error) {
+    console.error('updateOrderStatus error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 module.exports = {
-  createOrder,
   getOrders,
+  getOrderById,
+  createOrder,
   getOrdersWithPagination,
   getMyDeliveryOrdersWithPagination,
   assignOrder,
   assignBulk,
-  getOrderById,
-  getVerificationOrders,
-  getApprovedOrders,
   assignDelivery,
   assignBulkDelivery,
+  getApprovedOrders,
+  getVerificationOrders,
   cancelOrder,
   initiateHandover,
   verifyHandover,
@@ -3604,4 +3634,5 @@ module.exports = {
   sendIndividualConvertOTP,
   verifyConvertSaleOTP,
   createConvertedSale,
+  updateOrderStatus,
 };

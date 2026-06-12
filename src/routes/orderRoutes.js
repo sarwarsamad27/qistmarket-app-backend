@@ -37,9 +37,10 @@ const {
   sendIndividualConvertOTP,
   verifyConvertSaleOTP,
   createConvertedSale,
+  updateOrderStatus,
 } = require('../controllers/ordersController');
 const { submitSelfPickupDelivery } = require('../controllers/deliveryController');
-const { authenticateJWT } = require('../middlewares/authMiddleware');
+const { authenticateJWT, requireSuperAdmin } = require('../middlewares/authMiddleware');
 const upload = require('../middlewares/uploadMiddleware');
 const fixUploadPath = require('../middlewares/fixUploadPath');
 
@@ -67,6 +68,7 @@ router.patch('/orders/:id/assign-delivery', authenticateJWT, assignDelivery);
 router.post('/orders/assign-bulk-delivery', authenticateJWT, assignBulkDelivery);
 router.patch('/orders/website-feed/:id/cancel', authenticateJWT, cancelWebsiteOrderFeedItem);
 router.patch('/orders/:id/cancel', authenticateJWT, cancelOrder);
+router.patch('/orders/:id/status', authenticateJWT, requireSuperAdmin, updateOrderStatus);
 router.patch('/orders/:id/update-item', authenticateJWT, updateOrderItem);
 router.patch('/orders/:id/take', authenticateJWT, takeOrder);
 router.patch('/orders/:id/transfer', authenticateJWT, transferOrder);
