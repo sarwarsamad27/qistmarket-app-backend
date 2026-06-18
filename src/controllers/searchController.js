@@ -37,7 +37,10 @@ const globalSearch = async (req, res) => {
                     include: {
                         purchaser: true,
                         grantors: true,
-                        documents: true
+                        documents: true,
+                        verification_locations: {
+                            include: { photos: true }
+                        }
                     }
                 },
                 delivery: true,
@@ -62,7 +65,7 @@ const globalSearch = async (req, res) => {
                             include: {
                                 installment_ledger: true,
                                 delivery: true,
-                                verification: { include: { purchaser: true, grantors: true, documents: true } }
+                                verification: { include: { purchaser: true, grantors: true, documents: true, verification_locations: { include: { photos: true } } } }
                             }
                         }
                     }
@@ -86,7 +89,7 @@ const globalSearch = async (req, res) => {
                             include: {
                                 installment_ledger: true,
                                 delivery: true,
-                                verification: { include: { purchaser: true, grantors: true, documents: true } }
+                                verification: { include: { purchaser: true, grantors: true, documents: true, verification_locations: { include: { photos: true } } } }
                             }
                         }
                     }
@@ -156,7 +159,8 @@ const globalSearch = async (req, res) => {
                     cnic: purchaser?.cnic_number,
                     purchaser: purchaser,
                     grantors: order.verification.grantors,
-                    documents: order.verification.documents
+                    documents: order.verification.documents,
+                    verification_locations: order.verification.verification_locations
                 } : null
             };
         });

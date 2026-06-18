@@ -10,6 +10,8 @@ const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const admin = require('firebase-admin');
 const { generateConsumerNumber, generateSmartPayConsumerNumber } = require('../utils/consumerNumberUtils');
 const { createOfficerTransaction } = require('../utils/officerTransactionUtils');
+const qrcode = require('qrcode');
+
 
 // ─── Firebase Init ────────────────────────────────────────────────
 if (!admin.apps.length) {
@@ -805,7 +807,20 @@ const getCashInHand = async (req, res) => {
       }
     });
 
-    // Re-sort just in case grouping affected order
+    // Re-sort ascending to calculate chronological running balance
+    groupedHistory.sort((a, b) => new Date(a.transaction_date).getTime() - new Date(b.transaction_date).getTime());
+    
+    let runBal = 0;
+    groupedHistory.forEach(item => {
+      if (item.type === 'credit') {
+        runBal += item.amount;
+      } else if (item.type === 'debit' && item.status === 'paid') {
+        runBal -= item.amount;
+      }
+      item.balance = runBal;
+    });
+
+    // Re-sort descending for display (newest first)
     groupedHistory.sort((a, b) => new Date(b.transaction_date).getTime() - new Date(a.transaction_date).getTime());
 
     // Calculate totals and running balance correctly
@@ -835,11 +850,23 @@ const submitCashToOutlet = async (req, res) => {
   const { outlet_id, payment_method, submit_amount } = req.body;
   const deliveryBoyId = req.user?.id;
 
-  if (!outlet_id) {
-    return res.status(400).json({ success: false, message: 'outlet_id is required' });
+  if (payment_method !== 'Online' && !outlet_id) {
+    return res.status(400).json({ success: false, message: 'outlet_id is required for cash submissions' });
   }
 
   try {
+    // 0. Check for pending submissions
+    const pendingSubmission = await prisma.cashSubmissionHistory.findFirst({
+        where: {
+            cash_in_hand: { officer_id: deliveryBoyId },
+            status: 'pending'
+        }
+    });
+
+    if (pendingSubmission) {
+        return res.status(400).json({ success: false, message: 'You already have a pending cash submission. Please complete it first.' });
+    }
+
     // 1. Fetch all cash entries to calculate bank-like balance
     let availableEntries = await prisma.cashInHand.findMany({
       where: { officer_id: deliveryBoyId },
@@ -892,7 +919,7 @@ const submitCashToOutlet = async (req, res) => {
         status: 'pending',
         otp: otp,
         submission_ref: submissionRef, // Group them
-        outlet_id: parseInt(outlet_id),
+        outlet_id: payment_method === 'Online' ? null : parseInt(outlet_id),
         submission_date: now()   // ✅ explicit submission_date
       });
 
@@ -904,14 +931,16 @@ const submitCashToOutlet = async (req, res) => {
       data: historyCreations
     });
 
-    // 3.1 Create OfficerTransaction records for debits sequentially to maintain correct balance
+    // 3.1 Create OfficerTransaction records for debits sequentially.
+    // STATUS IS ALWAYS 'pending' — only moves to 'paid' when OTP is verified by outlet.
+    // This ensures the officer's balance is NOT cut until cash is physically confirmed.
     for (const hc of historyCreations) {
       await createOfficerTransaction({
         officer_id: deliveryBoyId,
         type: 'debit',
         amount: hc.amount_submitted,
-        status: 'paid',
-        description: `Cash submitted to outlet`,
+        status: 'pending', // Always pending until OTP verification
+        description: payment_method === 'Online' ? 'Online cash submission (awaiting payment)' : 'Cash submitted to outlet (awaiting OTP)',
         payment_method: payment_method || 'Cash',
         submission_ref: hc.submission_ref
       });
@@ -921,7 +950,91 @@ const submitCashToOutlet = async (req, res) => {
     const officerName = officer?.full_name || 'Officer';
     const officerPhone = officer?.phone;
 
-    // 4. Persistence & Notifications
+    if (payment_method === 'Online') {
+      const userRecord = await prisma.user.findUnique({
+          where: { id: deliveryBoyId },
+          select: { bill_consumer_number: true, smart_pay_consumer_number: true }
+      });
+
+      if (!userRecord?.bill_consumer_number) {
+          return res.status(400).json({ success: false, message: 'Your account does not have an active 1Bill or SmartPay number. Please contact support.' });
+      }
+
+      const dueDate = new Date();
+      dueDate.setHours(dueDate.getHours() + 24);
+
+      let qrImageBase64 = null;
+      try {
+          const yy = String(dueDate.getFullYear()).slice(-2);
+          const mm = String(dueDate.getMonth() + 1).padStart(2, '0');
+          const billingMonth = `${yy}${mm}`;
+          const refInfo = `QIST-${deliveryBoyId}-${Date.now()}`.substring(0, 30);
+          const username = process.env.SMARTPAY_USERNAME || 'test';
+          const password = process.env.SMARTPAY_PASSWORD || 'test';
+
+          const tokenReq = await fetch(process.env.SMARTPAY_TOKEN_URL || 'https://smartpay.com.pk/services/api/v1/token', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ username, password })
+          });
+          const tokenResponse = await tokenReq.json();
+          if (tokenResponse?.statusCode === "200" && tokenResponse?.dist?.jwtToken) {
+              const dqrReq = await fetch(process.env.SMARTPAY_DQR_URL || 'https://smartpay.com.pk/services/api/v1/DQR', {
+                  method: 'POST',
+                  headers: {
+                      'Content-Type': 'application/json',
+                      'Authorization': `${tokenResponse.dist.jwtToken}`
+                  },
+                  body: JSON.stringify({
+                      Consumer_Number: userRecord.smart_pay_consumer_number,
+                      Consumer_Detail: officerName,
+                      Billing_Month: billingMonth,
+                      Amount: parseFloat(amountToSubmit).toFixed(2),
+                      CellNo: officerPhone || "",
+                      EMail: "",
+                      ReferenceInfo: refInfo,
+                      reserved: ""
+                  })
+              });
+              const dqrResponse = await dqrReq.json();
+              if (dqrResponse?.statusCode === "200" && dqrResponse?.QrString) {
+                  qrImageBase64 = await qrcode.toDataURL(dqrResponse.QrString, {
+                      errorCorrectionLevel: 'H',
+                      margin: 2,
+                      width: 400
+                  });
+              }
+          }
+      } catch (err) {
+          console.error("Failed to generate SmartPay QR in submitCash:", err);
+      }
+
+      await prisma.consumerNumber.updateMany({
+          where: { 
+              consumer_number: { in: [userRecord.bill_consumer_number, userRecord.smart_pay_consumer_number] },
+              user_id: deliveryBoyId 
+          },
+          data: {
+              amount_due: amountToSubmit,
+              bill_status: 'U',
+              cash_submission_ref: submissionRef,
+              due_date: dueDate
+          }
+      });
+
+      return res.status(200).json({
+          success: true,
+          message: 'Online cash submission initiated.',
+          total_amount: amountToSubmit,
+          bill_consumer_number: userRecord.bill_consumer_number,
+          smart_pay_consumer_number: userRecord.smart_pay_consumer_number,
+          smart_pay_qr_base64: qrImageBase64,
+          submission_ref: submissionRef,
+          expires_at: dueDate
+      });
+    }
+
+    // 4. Persistence & Notifications (Outlet flow)
     const otpMessage = `Your Cash Submission OTP is: ${otp}`;
 
     // Save to OtpLog with explicit created_at

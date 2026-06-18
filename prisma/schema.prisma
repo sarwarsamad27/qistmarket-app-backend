@@ -47,6 +47,8 @@ model User {
   is_online                      Boolean                   @default(false)
   last_known_latitude            Float?
   last_known_longitude           Float?
+  bill_consumer_number           String?                   @unique
+  smart_pay_consumer_number      String?                   @unique
   last_online_at                 DateTime?
   working_hours_end              String?                   @db.VarChar(30)
   working_hours_start            String?                   @db.VarChar(30)
@@ -83,6 +85,7 @@ model User {
   delivery_rankings              DeliveryRanking[]
   recovery_rankings              RecoveryRanking[]
   officer_transactions           OfficerTransaction[]      @relation("OfficerTransactions")
+  consumer_numbers               ConsumerNumber[]          @relation("UserConsumerNumbers")
 
   @@index([role_id])
   @@index([is_online])
@@ -1117,28 +1120,33 @@ model CsrRanking {
 }
 
 model ConsumerNumber {
-  id              Int       @id @default(autoincrement())
-  consumer_number String    @unique
-  ledger_id       Int
-  delivery_id     Int
-  customer_name   String
-  mobile_number   String
-  imei_serial     String?
-  amount_due      Decimal   @db.Decimal(10, 2)
-  billing_month   String    @db.VarChar(4) // format YYMM
-  due_date        DateTime
-  bill_status     String    @default("U") @db.VarChar(1) // U=Unpaid, P=Paid, B=Blocked
-  amount_paid     Decimal?  @db.Decimal(10, 2)
-  date_paid       DateTime?
-  tran_auth_id    String?
-  bank_mnemonic   String?
-  created_at      DateTime  @default(now())
-  updated_at      DateTime  @updatedAt
+  id                  Int       @id @default(autoincrement())
+  consumer_number     String    @unique
+  ledger_id           Int?
+  delivery_id         Int?
+  user_id             Int?
+  type                String    @default("installment") // "installment" or "officer_cash"
+  cash_submission_ref String?   // Used to link with CashSubmissionHistory
+  customer_name       String
+  mobile_number       String
+  imei_serial         String?
+  amount_due          Decimal   @db.Decimal(10, 2)
+  billing_month       String    @db.VarChar(4) // format YYMM
+  due_date            DateTime
+  bill_status         String    @default("U") @db.VarChar(1) // U=Unpaid, P=Paid, B=Blocked
+  amount_paid         Decimal?  @db.Decimal(10, 2)
+  date_paid           DateTime?
+  tran_auth_id        String?
+  bank_mnemonic       String?
+  created_at          DateTime  @default(now())
+  updated_at          DateTime  @updatedAt
 
-  ledger   InstallmentLedger @relation(fields: [ledger_id], references: [id])
-  delivery Delivery          @relation(fields: [delivery_id], references: [id])
+  ledger   InstallmentLedger? @relation(fields: [ledger_id], references: [id])
+  delivery Delivery?          @relation(fields: [delivery_id], references: [id])
+  user     User?              @relation("UserConsumerNumbers", fields: [user_id], references: [id])
 
   @@index([consumer_number])
+  @@index([cash_submission_ref])
   @@map("consumer_numbers")
 }
 

@@ -490,15 +490,16 @@ const verifyCashSubmissionOTP = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Invalid OTP or no pending submissions found' });
         }
 
+        // Collect all submission_refs to mark OfficerTransactions as paid
+        const submissionRefs = [...new Set(histories.map(h => h.submission_ref).filter(Boolean))];
+
         // Process each partial submission
         for (const history of histories) {
-            // Mark history as paid (CashSubmissionHistory has no updated_at field)
             await prisma.cashSubmissionHistory.update({
                 where: { id: history.id },
                 data: { status: 'paid', otp: null }
             });
 
-            // Update parent CashInHand with updated_at
             let newSubmitted = (history.cash_in_hand.submitted_amount || 0) + history.amount_submitted;
             const isFullyPaid = newSubmitted >= history.cash_in_hand.amount;
 
@@ -508,18 +509,26 @@ const verifyCashSubmissionOTP = async (req, res) => {
                     submitted_amount: newSubmitted,
                     status: isFullyPaid ? 'paid' : 'pending',
                     otp: null,
-                    updated_at: now()   // ✅ explicit updated_at
+                    updated_at: now()
                 }
             });
         }
 
-        // Sum amounts for Cash Register update
-        const totalAmount = histories.reduce((sum, h) => sum + h.amount_submitted, 0);
+        // ✅ KEY FIX: Mark OfficerTransaction debits as 'paid' — this cuts the officer's balance
+        if (submissionRefs.length > 0) {
+            await prisma.officerTransaction.updateMany({
+                where: {
+                    submission_ref: { in: submissionRefs },
+                    type: 'debit',
+                    status: 'pending'
+                },
+                data: { status: 'paid' }
+            });
+        }
 
-        // Update Cash Register
+        const totalAmount = histories.reduce((sum, h) => sum + h.amount_submitted, 0);
         await updateCashRegister(null, parseInt(outlet_id), 'cash_from_delivery', totalAmount, 'add');
 
-        // Notify the Delivery Officer
         if (histories.length > 0) {
             const officerId = histories[0].cash_in_hand.officer_id;
             const io = req.app.get('io');
@@ -2191,6 +2200,121 @@ const updateInstallmentNote = async (req, res) => {
     }
 };
 
+// =====================
+// PENDING CASH SUBMISSIONS (Outlet: see & resend OTP)
+// =====================
+
+const getPendingCashSubmissions = async (req, res) => {
+    const outletId = req.user.outlet_id;
+    if (!outletId) return res.status(403).json({ success: false, message: 'Not an outlet user.' });
+
+    try {
+        const pending = await prisma.cashSubmissionHistory.findMany({
+            where: {
+                outlet_id: outletId,
+                status: 'pending'
+            },
+            include: {
+                cash_in_hand: {
+                    include: {
+                        officer: { select: { id: true, full_name: true, username: true, phone: true, image: true } },
+                        order: { select: { order_ref: true } }
+                    }
+                }
+            },
+            orderBy: { submission_date: 'desc' }
+        });
+
+        // Group by submission_ref
+        const groupedMap = {};
+        const results = [];
+
+        pending.forEach(h => {
+            const ref = h.submission_ref || `indiv_${h.id}`;
+            if (!groupedMap[ref]) {
+                groupedMap[ref] = {
+                    submission_ref: ref,
+                    total_amount: 0,
+                    submitted_at: h.submission_date,
+                    payment_method: h.cash_in_hand?.payment_method || 'Cash',
+                    officer: h.cash_in_hand?.officer || null,
+                    order_refs: []
+                };
+                results.push(groupedMap[ref]);
+            }
+            groupedMap[ref].total_amount += h.amount_submitted;
+            const orderRef = h.cash_in_hand?.order?.order_ref;
+            if (orderRef && !groupedMap[ref].order_refs.includes(orderRef)) {
+                groupedMap[ref].order_refs.push(orderRef);
+            }
+        });
+
+        return res.status(200).json({ success: true, data: results });
+    } catch (error) {
+        console.error('getPendingCashSubmissions error:', error);
+        return res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const resendCashSubmissionOTP = async (req, res) => {
+    const outletId = req.user.outlet_id;
+    const { submission_ref } = req.body;
+
+    if (!submission_ref) {
+        return res.status(400).json({ success: false, message: 'submission_ref is required' });
+    }
+
+    try {
+        // Find pending submissions for this ref
+        const histories = await prisma.cashSubmissionHistory.findMany({
+            where: { submission_ref, outlet_id: outletId, status: 'pending' },
+            include: {
+                cash_in_hand: {
+                    include: {
+                        officer: { select: { id: true, full_name: true, phone: true, fcm_token: true } }
+                    }
+                }
+            }
+        });
+
+        if (histories.length === 0) {
+            return res.status(404).json({ success: false, message: 'No pending submission found for this reference.' });
+        }
+
+        // Generate new OTP
+        const newOtp = Math.floor(1000 + Math.random() * 9000).toString();
+
+        // Update all history records with the new OTP
+        await prisma.cashSubmissionHistory.updateMany({
+            where: { submission_ref, outlet_id: outletId, status: 'pending' },
+            data: { otp: newOtp }
+        });
+
+        const officer = histories[0].cash_in_hand.officer;
+        const io = req.app.get('io');
+
+        // Send OTP via socket to officer's app
+        if (io && officer?.id) {
+            io.to(`user_${officer.id}`).emit('cash_submission_otp', {
+                action: 'cash_submission_otp',
+                message: `Your Cash Submission OTP is: ${newOtp}`,
+                otp: newOtp
+            });
+        }
+
+        // Also send via Firebase if available
+        const { sendCashSubmissionOTPNotification } = require('./deliveryController');
+        if (sendCashSubmissionOTPNotification) {
+            await sendCashSubmissionOTPNotification(officer, newOtp, io).catch(e => console.error('FCM error:', e));
+        }
+
+        return res.status(200).json({ success: true, message: 'OTP resent to officer successfully.' });
+    } catch (error) {
+        console.error('resendCashSubmissionOTP error:', error);
+        return res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
 module.exports = {
     createOutlet,
     getOutlets,
@@ -2211,5 +2335,7 @@ module.exports = {
     getOutletOfficers,
     getOfficerDetails,
     getOutletInstallmentsDueList,
-    updateInstallmentNote
+    updateInstallmentNote,
+    getPendingCashSubmissions,
+    resendCashSubmissionOTP
 };

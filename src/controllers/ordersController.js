@@ -1039,6 +1039,8 @@ const getOrdersWithPagination = async (req, res) => {
           } else {
             baseWhere.channel = value;
           }
+        } else if (key === 'home_location_required') {
+          baseWhere.verification = { home_location_required: true };
         } else if (key === 'dateRange') {
           const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
           if (range) {
@@ -1066,12 +1068,14 @@ const getOrdersWithPagination = async (req, res) => {
       include: {
         created_by: { select: { username: true } },
         assigned_to: { select: { username: true } },
+        statusHistories: true,
         productHistories: {
           include: {
             changed_by: { select: { username: true, full_name: true } }
           },
           orderBy: { changed_at: 'desc' }
-        }
+        },
+        verification: true || null,
       },
     });
 
@@ -1665,6 +1669,8 @@ const getMyDeliveryOrdersWithPagination = async (req, res) => {
           baseWhere.status = value;
         } else if (key === 'created_by') {
           baseWhere.created_by = { username: value };
+        } else if (key === 'home_location_required') {
+          baseWhere.verification = { home_location_required: true };
         } else if (key !== 'startDate' && key !== 'endDate' && key !== 'nextLastId') {
           baseWhere[key] = { contains: value };
         }
@@ -1699,6 +1705,7 @@ const getMyDeliveryOrdersWithPagination = async (req, res) => {
             full_name: true,
           },
         },
+        statusHistories: true,
         delivery_officer: {
           select: {
             username: true,

@@ -20,7 +20,9 @@ const {
     getOutletOfficers,
     getOfficerDetails,
     getOutletInstallmentsDueList,
-    updateInstallmentNote
+    updateInstallmentNote,
+    getPendingCashSubmissions,
+    resendCashSubmissionOTP
 } = require('../controllers/outletController');
 const { generateSmartPayQr, checkSmartPayQr } = require('../controllers/smartPayController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
@@ -36,6 +38,8 @@ router.get('/outlet/dashboard-stats', authenticateJWT, getDashboardStats);
 router.post('/outlet/verify-cash-otp', authenticateJWT, verifyCashSubmissionOTP);
 router.get('/outlet/global-cash-in-hand', authenticateJWT, getGlobalCashInHand);
 router.get('/outlet/cash-history', authenticateJWT, getOutletCashHistory);
+router.get('/outlet/pending-cash-submissions', authenticateJWT, getPendingCashSubmissions);
+router.post('/outlet/resend-cash-otp', authenticateJWT, resendCashSubmissionOTP);
 
 // Return and Exchange Module
 router.get('/outlet/return-exchanges', authenticateJWT, getReturnExchanges);

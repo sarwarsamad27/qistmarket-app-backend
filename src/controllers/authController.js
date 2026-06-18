@@ -7,6 +7,8 @@ const { sendOTP } = require('../services/watiService');
 const { getOTPEmailTemplate } = require('../utils/emailTemplates');
 const { logAction } = require('../utils/auditLogger');
 
+const { generateConsumerNumber, generateSmartPayConsumerNumber } = require('../utils/consumerNumberUtils');
+
 const { notifyAdmins } = require('../utils/notificationUtils');
 
 const now = () => new Date();
@@ -351,7 +353,7 @@ const signup = async (req, res) => {
       hashedPassword = await bcrypt.hash(password, 10);
     }
 
-    const user = await prisma.user.create({
+    let user = await prisma.user.create({
       data: {
         full_name,
         username: username.toLowerCase().trim(),
@@ -366,6 +368,55 @@ const signup = async (req, res) => {
         updated_at: now() 
       },
       include: { role: true, outlet: true },
+    });
+
+    // Generate consumer numbers based on user's phone using standard utility
+    const billConsumerNumber = await generateConsumerNumber(null, user.phone);
+    const smartPayConsumerNumber = await generateSmartPayConsumerNumber(null, user.phone);
+
+    // Update user with consumer numbers
+    user = await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        bill_consumer_number: billConsumerNumber,
+        smart_pay_consumer_number: smartPayConsumerNumber,
+      },
+      include: { role: true, outlet: true },
+    });
+
+    // Create ConsumerNumber records for the user
+    const dueDate = new Date();
+    dueDate.setFullYear(dueDate.getFullYear() + 10); // Valid for 10 years
+
+    await prisma.consumerNumber.createMany({
+      data: [
+        {
+          consumer_number: billConsumerNumber,
+          user_id: user.id,
+          type: 'officer_cash',
+          customer_name: user.full_name,
+          mobile_number: user.phone,
+          amount_due: 0,
+          billing_month: '2401',
+          due_date: dueDate,
+          bill_status: 'P',
+          created_at: now(),
+          updated_at: now(),
+        },
+        {
+          consumer_number: smartPayConsumerNumber,
+          user_id: user.id,
+          type: 'officer_cash',
+          customer_name: user.full_name,
+          mobile_number: user.phone,
+          amount_due: 0,
+          billing_month: '2401',
+          due_date: dueDate,
+          bill_status: 'P',
+          created_at: now(),
+          updated_at: now(),
+        }
+      ]
     });
 
     return res.status(201).json({

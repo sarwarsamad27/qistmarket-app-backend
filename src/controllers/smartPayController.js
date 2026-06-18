@@ -420,6 +420,62 @@ const notifyPayment = async (req, res) => {
             }
         }
 
+        // **Officer Cash Submission Flow**
+        if (consumer.type === 'officer_cash') {
+            if (consumer.cash_submission_ref) {
+               await prisma.cashSubmissionHistory.updateMany({
+                   where: { submission_ref: consumer.cash_submission_ref },
+                   data: { status: 'paid' }
+               });
+               
+               await prisma.officerTransaction.updateMany({
+                   where: { submission_ref: consumer.cash_submission_ref, type: 'debit', status: 'pending' },
+                   data: { status: 'paid', transaction_date: paidDateParsed, payment_method: `SmartPay QR - TxID: ${transactionId}` }
+               });
+               
+               const submissions = await prisma.cashSubmissionHistory.findMany({
+                   where: { submission_ref: consumer.cash_submission_ref }
+               });
+               
+               for (const sub of submissions) {
+                   await prisma.cashInHand.update({
+                       where: { id: sub.cash_in_hand_id },
+                       data: { submitted_amount: { increment: sub.amount_submitted } }
+                   });
+               }
+            }
+
+            await prisma.consumerNumber.update({
+                where: { id: consumer.id },
+                data: {
+                    bill_status: 'P',
+                    amount_due: 0,
+                    cash_submission_ref: null,
+                    amount_paid: parsedAmountFinal,
+                    date_paid: paidDateParsed,
+                    tran_auth_id: transactionId,
+                    updated_at: now()
+                }
+            });
+            
+            const io = req.app.get('io');
+            if (io && consumer.user_id) {
+                io.to(`user_${consumer.user_id}`).emit('online_cash_submission_completed', {
+                    status: 'paid',
+                    amount: parsedAmountFinal,
+                    submission_ref: consumer.cash_submission_ref
+                });
+                io.to(`user_${consumer.user_id}`).emit('cash_submission_completed', {
+                    status: 'paid',
+                    amount: parsedAmountFinal,
+                    submission_ref: consumer.cash_submission_ref
+                });
+            }
+            
+            await prisma.smartPayPaymentLog.update({ where: { id: logEntry.id }, data: { status: "success" } });
+            return res.status(200).json({ statusCode: "200", statusMessage: "Success" });
+        }
+
         const ledger = await prisma.installmentLedger.findUnique({
             where: { id: consumer.ledger_id },
             include: {

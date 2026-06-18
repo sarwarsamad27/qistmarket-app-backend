@@ -108,9 +108,12 @@ const billInquiry = async (req, res) => {
         let calculatedAmountDue = 0;
         let inquiryDueDate = consumer.due_date ? toYYYYMMDD(consumer.due_date) : "        ";
 
-        const ledger = await prisma.installmentLedger.findUnique({
-            where: { id: consumer.ledger_id }
-        });
+        let ledger = null;
+        if (consumer.ledger_id) {
+            ledger = await prisma.installmentLedger.findUnique({
+                where: { id: consumer.ledger_id }
+            });
+        }
 
         if (ledger && Array.isArray(ledger.ledger_rows)) {
             const today = new Date();
@@ -275,6 +278,57 @@ const billPayment = async (req, res) => {
             if (!isNaN(constructed.getTime())) {
                 paidDateParsed = constructed;
             }
+        }
+
+        // **Officer Cash Submission Flow**
+        if (consumer.type === 'officer_cash') {
+            if (consumer.cash_submission_ref) {
+               await prisma.cashSubmissionHistory.updateMany({
+                   where: { submission_ref: consumer.cash_submission_ref },
+                   data: { status: 'paid' }
+               });
+               
+               await prisma.officerTransaction.updateMany({
+                   where: { submission_ref: consumer.cash_submission_ref, type: 'debit', status: 'pending' },
+                   data: { status: 'paid', transaction_date: paidDateParsed, payment_method: `1LINK TPS - ${bank_mnemonic || ''}` }
+               });
+               
+               const submissions = await prisma.cashSubmissionHistory.findMany({
+                   where: { submission_ref: consumer.cash_submission_ref }
+               });
+               
+               for (const sub of submissions) {
+                   await prisma.cashInHand.update({
+                       where: { id: sub.cash_in_hand_id },
+                       data: { submitted_amount: { increment: sub.amount_submitted } }
+                   });
+               }
+            }
+
+            await prisma.consumerNumber.update({
+                where: { id: consumer.id },
+                data: {
+                    bill_status: 'P',
+                    amount_due: 0,
+                    cash_submission_ref: null,
+                    amount_paid: parsedAmountFinal,
+                    date_paid: paidDateParsed,
+                    tran_auth_id: tran_auth_id,
+                    updated_at: now()
+                }
+            });
+            
+            const io = req.app.get('io');
+            if (io && consumer.user_id) {
+                io.to(`user_${consumer.user_id}`).emit('online_cash_submission_completed', {
+                    status: 'paid',
+                    amount: parsedAmountFinal,
+                    submission_ref: consumer.cash_submission_ref
+                });
+            }
+            
+            await prisma.tpsPaymentLog.update({ where: { id: logEntry.id }, data: { response_code_sent: "00" } });
+            return res.status(200).json({ response_Code: "00", Identification_parameter: "SUCCESS" });
         }
 
         // Load ledger

@@ -518,8 +518,68 @@ server.listen(PORT, () => {
     }
   };
 
+  // ── Expire pending online cash submissions after 24 hours ──────────────────
+  const expirePendingCashSubmissions = async () => {
+    try {
+      const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+      // Find all pending submission histories older than 24 hours
+      const expired = await prisma.cashSubmissionHistory.findMany({
+        where: { status: 'pending', submission_date: { lt: cutoff } },
+        select: { id: true, submission_ref: true }
+      });
+
+      if (expired.length === 0) return;
+
+      const refs = [...new Set(expired.map(e => e.submission_ref).filter(Boolean))];
+
+      // Cancel the submission histories
+      await prisma.cashSubmissionHistory.updateMany({
+        where: { status: 'pending', submission_date: { lt: cutoff } },
+        data: { status: 'cancelled' }
+      });
+
+      // Cancel pending officer transactions
+      if (refs.length > 0) {
+        await prisma.officerTransaction.updateMany({
+          where: { submission_ref: { in: refs }, status: 'pending' },
+          data: { status: 'cancelled' }
+        });
+
+        // Reset the ConsumerNumbers for these refs
+        for (const ref of refs) {
+          const consumer = await prisma.consumerNumber.findFirst({
+            where: { cash_submission_ref: ref }
+          });
+          if (consumer) {
+            await prisma.consumerNumber.update({
+              where: { id: consumer.id },
+              data: { bill_status: 'P', amount_due: 0, cash_submission_ref: null }
+            });
+
+            // Notify the officer via socket
+            if (consumer.user_id) {
+              io.to(`user_${consumer.user_id}`).emit('online_cash_submission_cancelled', {
+                status: 'cancelled',
+                submission_ref: ref,
+                message: 'Your online cash submission expired after 24 hours.'
+              });
+            }
+          }
+        }
+
+        console.log(`Cash expiry: cancelled ${refs.length} pending online submission(s)`);
+      }
+    } catch (err) {
+      console.error('Cash submission expiry task failed:', err);
+    }
+  };
+
   runExpiryTask();
   setInterval(runExpiryTask, 5 * 60 * 1000);
+
+  expirePendingCashSubmissions();
+  setInterval(expirePendingCashSubmissions, 30 * 60 * 1000); // every 30 minutes
 });
 
 // Graceful shutdown
