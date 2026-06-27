@@ -201,6 +201,7 @@ const getRecoveryCustomers = async (req, res) => {
               orderBy: { uploaded_at: 'desc' },
               take: 1,
             },
+            grantors: true,
           },
         },
         delivery: {
@@ -271,6 +272,7 @@ const getRecoveryCustomers = async (req, res) => {
             city: order.city,
             area: order.area,
             profile_photo: profilePhoto,
+            grantors: order.verification?.grantors || [],
           },
           orders: [],
         });
@@ -648,7 +650,7 @@ const submitInstallment = async (req, res) => {
 
       await tx.installmentLedger.update({
         where: { id: ledger.id },
-        data: { 
+        data: {
           ledger_rows: rows,
           updated_at: now()   // ✅ explicit updated_at
         }
@@ -668,7 +670,7 @@ const submitInstallment = async (req, res) => {
             product_name: finalProductName,
             imei_serial: imeiSerial || order.imei_serial,
             payment_method: payment_method,
-            cash_type: 'Installment payment',         
+            cash_type: 'Installment payment',
             submitted_amount: 0,
             created_at: now(),   // ✅ explicit created_at
             updated_at: now()    // ✅ explicit updated_at
@@ -941,24 +943,24 @@ const getRecoveryDashboardStats = async (req, res) => {
 
     // Recovery-specific metrics
     const cashInHandSum = await prisma.cashInHand.aggregate({
-        where: { officer_id: userId, status: 'pending' },
-        _sum: { amount: true, submitted_amount: true }
+      where: { officer_id: userId, status: 'pending' },
+      _sum: { amount: true, submitted_amount: true }
     });
 
     const totalCashInHand = (cashInHandSum._sum.amount || 0) - (cashInHandSum._sum.submitted_amount || 0);
 
     const collectedAmountSum = await prisma.recoveryVisit.aggregate({
-        where: { officer_id: userId, payment_collected: true, visit_time: dateFilter },
-        _sum: { amount_collected: true }
+      where: { officer_id: userId, payment_collected: true, visit_time: dateFilter },
+      _sum: { amount_collected: true }
     });
 
     const topVisitDeadlineOrders = await prisma.order.findMany({
-        where: {
-            recovery_officer_id: userId,
-            status: { in: ['pending', 'in_progress', 'delivered'] } // For recovery, delivered orders have installments
-        },
-        orderBy: { updated_at: 'asc' },
-        take: 5
+      where: {
+        recovery_officer_id: userId,
+        status: { in: ['pending', 'in_progress', 'delivered'] } // For recovery, delivered orders have installments
+      },
+      orderBy: { updated_at: 'asc' },
+      take: 5
     });
 
     // Yesterday for increment
@@ -994,7 +996,7 @@ const getRecoveryDashboardStats = async (req, res) => {
 
     // Rankings
     const rankingPeriod = filter === 'custom' ? 'month' : filter;
-    
+
     const recoveryOfficers = await prisma.user.findMany({
       where: {
         role: {
@@ -1042,6 +1044,172 @@ const getRecoveryDashboardStats = async (req, res) => {
     officerRanking.sort((a, b) => b.score - a.score);
     officerRanking = officerRanking.map((r, index) => ({ ...r, rank: index + 1 }));
 
+    // Today's Installments
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    const activeRecoveryOrders = await prisma.order.findMany({
+      where: {
+        recovery_officer_id: userId,
+        status: { in: ['pending', 'in_progress', 'delivered'] },
+        is_delivered: true
+      },
+      include: {
+        installment_ledger: true,
+        verification: {
+          include: { purchaser: true }
+        }
+      }
+    });
+
+    let todayInstallmentsCount = 0;
+    let todayInstallmentsAmount = 0;
+    const todayInstallmentsAccounts = [];
+
+    try {
+      activeRecoveryOrders.forEach(order => {
+        if (!order.installment_ledger?.ledger_rows) return;
+
+        // ledger_rows might be a JSON string — parse it if needed
+        let rawRows = order.installment_ledger.ledger_rows;
+        if (typeof rawRows === 'string') {
+          rawRows = JSON.parse(rawRows);
+        }
+        if (!Array.isArray(rawRows)) return;
+
+        const normalized = getNormalizedLedger(rawRows);
+        const rows = normalized.rows;
+
+        rows.forEach(row => {
+          if (row.month === 0 || row.status === 'paid') return;
+
+          const dueDate = new Date(row.due_date || row.dueDate);
+          if (isNaN(dueDate.getTime())) return; // skip invalid dates
+          dueDate.setHours(0, 0, 0, 0);
+
+          if (dueDate.getTime() === today.getTime()) {
+            todayInstallmentsCount++;
+            todayInstallmentsAmount += (row.remainingAmount || 0);
+
+            todayInstallmentsAccounts.push({
+              orderId: order.id,
+              orderRef: order.order_ref || '',
+              customerName: order.verification?.purchaser?.name || order.customer_name || '',
+              itemName: order.product_name || '',
+              installmentAmount: row.dueAmount || 0,
+              remainingBalance: row.remainingAmount || 0,
+              totalRemaining: normalized.summary?.totalInstallmentRemaining || 0
+            });
+          }
+        });
+      });
+    } catch (installmentError) {
+      console.error('[Today Installments] Error calculating today installments:', installmentError.message);
+      console.error('[Today Installments] Stack:', installmentError.stack);
+    }
+
+    // ── Overdue / Defaulter / Blacklist ──────────────────────────────────
+    const threeMonthsAgo = new Date(today);
+    threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
+
+    const regularAccounts = [];
+    const overdueAccounts = [];
+    const defaulterAccounts = [];
+    const blacklistAccounts = [];
+
+    try {
+      activeRecoveryOrders.forEach(order => {
+        if (!order.installment_ledger?.ledger_rows) return;
+
+        let rawRows = order.installment_ledger.ledger_rows;
+        if (typeof rawRows === 'string') rawRows = JSON.parse(rawRows);
+        if (!Array.isArray(rawRows)) return;
+
+        const normalized = getNormalizedLedger(rawRows);
+        const installments = normalized.installment_ledger; // already filtered month>0
+
+        const customerName = order.verification?.purchaser?.name || order.customer_name || '';
+        const itemName = order.product_name || '';
+        const orderRef = order.order_ref || '';
+        const orderId = order.id;
+
+        // ── REGULAR / OVERDUE: unpaid rows whose due date has passed ────
+        // 1 missed due date  -> still a "Regular Account" (just late this month)
+        // 2+ missed due dates -> escalates to "Overdue" (missed next month too)
+        const overdueRows = installments.filter(r => {
+          if (r.status === 'paid') return false;
+          const d = new Date(r.dueDate);
+          return !isNaN(d.getTime()) && d < today;
+        });
+
+        if (overdueRows.length === 1) {
+          const totalOverdue = overdueRows.reduce((s, r) => s + (r.remainingAmount || 0), 0);
+          regularAccounts.push({
+            orderId, orderRef, customerName, itemName,
+            overdueMonths: overdueRows.length,
+            overdueAmount: totalOverdue,
+            totalRemaining: normalized.summary.totalInstallmentRemaining
+          });
+        } else if (overdueRows.length >= 2) {
+          const totalOverdue = overdueRows.reduce((s, r) => s + (r.remainingAmount || 0), 0);
+          overdueAccounts.push({
+            orderId, orderRef, customerName, itemName,
+            overdueMonths: overdueRows.length,
+            overdueAmount: totalOverdue,
+            totalRemaining: normalized.summary.totalInstallmentRemaining
+          });
+        }
+
+        // ── DEFAULTER: ZERO payment in last 3 months ───────────────────
+        // Find installments whose due date fell within last 3 months
+        const last3Rows = installments.filter(r => {
+          const d = new Date(r.dueDate);
+          return !isNaN(d.getTime()) && d >= threeMonthsAgo && d < today;
+        });
+
+        if (last3Rows.length >= 3) {
+          const totalPaidInPeriod = last3Rows.reduce((s, r) => s + (r.paidAmount || 0), 0);
+          if (totalPaidInPeriod === 0) {
+            defaulterAccounts.push({
+              orderId, orderRef, customerName, itemName,
+              missedMonths: last3Rows.length,
+              missedAmount: last3Rows.reduce((s, r) => s + (r.dueAmount || 0), 0),
+              totalRemaining: normalized.summary.totalInstallmentRemaining
+            });
+          }
+        }
+
+        // ── BLACKLIST: some payment in 3 months but very little ────────
+        if (last3Rows.length >= 3) {
+          const totalPaidInPeriod = last3Rows.reduce((s, r) => s + (r.paidAmount || 0), 0);
+          const totalDueInPeriod = last3Rows.reduce((s, r) => s + (r.dueAmount || 0), 0);
+          // Partial payment > 0 but less than 50% of what was due
+          if (totalPaidInPeriod > 0 && totalDueInPeriod > 0 &&
+            totalPaidInPeriod < totalDueInPeriod * 0.5) {
+            blacklistAccounts.push({
+              orderId, orderRef, customerName, itemName,
+              paidInPeriod: totalPaidInPeriod,
+              dueInPeriod: totalDueInPeriod,
+              coveragePercent: Math.round((totalPaidInPeriod / totalDueInPeriod) * 100),
+              totalRemaining: normalized.summary.totalInstallmentRemaining
+            });
+          }
+        }
+      });
+    } catch (classifyError) {
+      console.error('[Overdue/Defaulter/Blacklist] Error:', classifyError.message);
+    }
+
+    // Target Tracking (variables used in response below)
+    const monthlyTarget = Number(process.env.RECOVERY_TARGET_AMOUNT || 500000);
+    const customerTarget = Number(process.env.RECOVERY_TARGET_CUSTOMERS || 50);
+    const achievedAmount = collectedAmountSum._sum.amount_collected || 0;
+    const achievedCustomers = statusCounts['completed'] || 0;
+    const remainingAmount = Math.max(0, monthlyTarget - achievedAmount);
+    const remainingCustomers = Math.max(0, customerTarget - achievedCustomers);
+
     return res.status(200).json({
       success: true,
       data: {
@@ -1062,20 +1230,143 @@ const getRecoveryDashboardStats = async (req, res) => {
         bikeRange: officerInfo?.bike_km_range || 0,
         workingHours: `${officerInfo?.working_hours_start || '09:00'} - ${officerInfo?.working_hours_end || '18:00'}`,
         cashInHand: totalCashInHand,
-        collectedAmount: collectedAmountSum._sum.amount_collected || 0,
+        collectedAmount: achievedAmount,
         topVisitDeadlineOrders,
         todayIncrement,
+        todayInstallments: {
+          count: todayInstallmentsCount,
+          totalAmount: todayInstallmentsAmount,
+          accounts: todayInstallmentsAccounts
+        },
+        regular: {
+          count: regularAccounts.length,
+          accounts: regularAccounts
+        },
+        overdue: {
+          count: overdueAccounts.length,
+          accounts: overdueAccounts
+        },
+        defaulter: {
+          count: defaulterAccounts.length,
+          accounts: defaulterAccounts
+        },
+        blacklist: {
+          count: blacklistAccounts.length,
+          accounts: blacklistAccounts
+        },
+        targetTracking: {
+          achievedAmount,
+          targetAmount: monthlyTarget,
+          remainingAmount,
+          achievedCustomers,
+          targetCustomers: customerTarget,
+          remainingCustomers,
+        },
         officerRanking
       },
     });
   } catch (error) {
     console.error('getDashboardStats error:', error);
-    return res.status(500).json({ success: false, message: 'Internal server error' });
+    console.error('getDashboardStats error message:', error.message);
+    console.error('getDashboardStats error stack:', error.stack);
+    return res.status(500).json({ success: false, message: 'Internal server error', debug: error.message });
+  }
+};
+
+// ── Fuel Charges (Recovery Officer) ────────────────────────────────────────
+// Aggregates fuel_charges recorded against installment payments collected by
+// this officer (see submitInstallment), filtered by paid_at date range.
+const getRecoveryFuelCharges = async (req, res) => {
+  try {
+    const { filter = 'today', startDate, endDate } = req.query;
+    const userId = req.user?.id;
+
+    const nowDt = new Date();
+    let start, end;
+
+    if (filter === 'today') {
+      start = new Date(nowDt); start.setHours(0, 0, 0, 0);
+      end = new Date(nowDt); end.setHours(23, 59, 59, 999);
+    } else if (filter === 'month') {
+      start = new Date(nowDt.getFullYear(), nowDt.getMonth(), 1, 0, 0, 0, 0);
+      end = new Date(nowDt.getFullYear(), nowDt.getMonth() + 1, 0, 23, 59, 59, 999);
+    } else if (filter === 'custom' && startDate && endDate) {
+      start = new Date(startDate); start.setHours(0, 0, 0, 0);
+      end = new Date(endDate); end.setHours(23, 59, 59, 999);
+    } else {
+      start = new Date(nowDt); start.setHours(0, 0, 0, 0);
+      end = new Date(nowDt); end.setHours(23, 59, 59, 999);
+    }
+
+    const orders = await prisma.order.findMany({
+      where: {
+        recovery_officer_id: userId,
+        status: { in: ['pending', 'in_progress', 'delivered'] },
+        is_delivered: true
+      },
+      include: {
+        installment_ledger: true,
+        verification: { include: { purchaser: true } }
+      }
+    });
+
+    let totalFuelAmount = 0;
+    const entries = [];
+
+    orders.forEach(order => {
+      if (!order.installment_ledger?.ledger_rows) return;
+
+      let rawRows = order.installment_ledger.ledger_rows;
+      if (typeof rawRows === 'string') rawRows = JSON.parse(rawRows);
+      if (!Array.isArray(rawRows)) return;
+
+      const normalized = getNormalizedLedger(rawRows);
+
+      normalized.rows.forEach(row => {
+        const fuelAmount = parseFloat(row.fuel_charges || 0);
+        if (fuelAmount <= 0) return;
+        if (Number(row.collected_by) !== Number(userId)) return;
+
+        const paidAt = row.paid_at ? new Date(row.paid_at) : null;
+        if (!paidAt || isNaN(paidAt.getTime())) return;
+        if (paidAt < start || paidAt > end) return;
+
+        totalFuelAmount += fuelAmount;
+        entries.push({
+          orderId: order.id,
+          orderRef: order.order_ref || '',
+          customerName: order.verification?.purchaser?.name || order.customer_name || '',
+          itemName: order.product_name || '',
+          monthNumber: row.month ?? 0,
+          fuelAmount,
+          paymentAmount: parseFloat(row.paid_amount || 0),
+          paymentMethod: row.payment_method || '',
+          paidAt: paidAt.toISOString()
+        });
+      });
+    });
+
+    entries.sort((a, b) => new Date(b.paidAt) - new Date(a.paidAt));
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        filter,
+        dateRange: { start, end },
+        totalFuelAmount,
+        count: entries.length,
+        entries
+      }
+    });
+  } catch (error) {
+    console.error('getRecoveryFuelCharges error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error', debug: error.message });
   }
 };
 
 module.exports = {
   getRecoveryDashboardStats,
+  getRecoveryFuelCharges,
   getAllRecoveryOfficers,
   getRecoveryOfficerStats,
   getRecoveryCustomers,

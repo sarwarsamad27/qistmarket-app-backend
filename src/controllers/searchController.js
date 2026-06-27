@@ -624,6 +624,30 @@ const shapeOrderHistoryResponse = (verifications, verificationRoleMap) => {
         return orders;
 };
 
+// CSR feedback lives on Complaint.resolution_note — complaints aren't linked to
+// a specific order, only to the customer (by CNIC or mobile number).
+const fetchComplaints = async ({ cnic, phone }) => {
+    const or = [];
+    if (cnic) or.push({ customer_cnic: cnic });
+    if (phone) or.push({ mobile_number: phone });
+    if (or.length === 0) return [];
+
+    return prisma.complaint.findMany({
+        where: { OR: or },
+        select: {
+            id: true,
+            complaint_id: true,
+            description: true,
+            status: true,
+            resolution_note: true,
+            created_at: true,
+            updated_at: true,
+            assigned_to: { select: { id: true, full_name: true, username: true } },
+        },
+        orderBy: { created_at: 'desc' },
+    });
+};
+
 const getPersonOrderHistory = async (req, res) => {
     const { cnic, phone } = req.query;
     const normalizedCnic = cnic?.trim() || null;
@@ -642,6 +666,11 @@ const getPersonOrderHistory = async (req, res) => {
             phone: normalizedPhone,
         });
 
+        const complaints = await fetchComplaints({
+            cnic: normalizedCnic,
+            phone: normalizedPhone,
+        });
+
         if (verificationRoleMap.size === 0) {
             return res.json({
                 success: true,
@@ -649,6 +678,7 @@ const getPersonOrderHistory = async (req, res) => {
                 phone: normalizedPhone,
                 total: 0,
                 orders: [],
+                complaints,
             });
         }
 
@@ -662,6 +692,7 @@ const getPersonOrderHistory = async (req, res) => {
             phone: normalizedPhone,
             total: orders.length,
             orders,
+            complaints,
         });
     } catch (error) {
         console.error('getPersonOrderHistory Error:', error);

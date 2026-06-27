@@ -14,10 +14,13 @@ const {
     logRecoveryVisit,
     getOrderRecoveryVisits,
     replaceRecoveryVisitPhoto,
-    getDashboardStats
+    getRecoveryDashboardStats,
+    getRecoveryFuelCharges
 } = require('../controllers/recoveryController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
+router.get('/dashboard-stats', authenticateJWT, getRecoveryDashboardStats);
+router.get('/fuel-charges', authenticateJWT, getRecoveryFuelCharges);
 router.get('/officers', authenticateJWT, getAllRecoveryOfficers);
 router.get('/officers/:id/stats', authenticateJWT, getRecoveryOfficerStats);
 
