@@ -11,6 +11,7 @@ const admin = require('firebase-admin');
 const { generateConsumerNumber, generateSmartPayConsumerNumber } = require('../utils/consumerNumberUtils');
 const { createOfficerTransaction } = require('../utils/officerTransactionUtils');
 const qrcode = require('qrcode');
+const pt = require('../services/paytriggerService');
 
 
 // ─── Firebase Init ────────────────────────────────────────────────
@@ -169,6 +170,7 @@ const submitDelivery = async (req, res) => {
     let colorVariant = null;
     let productNameSnapshot = null;
     let stockTransferId = null;
+    let inventoryCategory = null;
 
     // Update Inventory Status and Transfer History if IMEI provided
     if (product_imei) {
@@ -186,6 +188,7 @@ const submitDelivery = async (req, res) => {
           }
         });
 
+        inventoryCategory = inventory.category;
         colorVariant = inventory.color_variant || null;
         productNameSnapshot = inventory.product_name;
 
@@ -330,6 +333,7 @@ const submitDelivery = async (req, res) => {
     // ─── Build Installment Ledger ────────────────────────────────────────────
     let installmentLedger = null;
     let ledgerUrl = null;
+    let firstInstallmentDueDate = null;
     try {
       // Parse plan for installment data
       const monthlyAmt = planObj?.monthly_amount || planObj?.monthlyAmount || order.monthly_amount || 0;
@@ -382,6 +386,11 @@ const submitDelivery = async (req, res) => {
               paid_at: null,
             });
           }
+        }
+
+        // Capture first installment due date for PayTrigger expiration
+        if (ledgerRows.length > 1 && ledgerRows[1].due_date) {
+          firstInstallmentDueDate = ledgerRows[1].due_date;
         }
 
         // Sign a long-lived token (2 years) — kept for backward compat
@@ -552,6 +561,109 @@ const submitDelivery = async (req, res) => {
         updatedDelivery.id,
         io
       );
+    }
+
+    // ── PayTrigger: Enroll device only for supported models (non-blocking) ───
+    const paytriggerBrand = pt.detectBrand(productNameSnapshot);
+    const refinedProductNameSnapshot = paytriggerBrand;
+    const paytriggerDebug = {
+      enabled: pt.ENABLED(),
+      hasImei: Boolean(updatedDelivery.product_imei),
+      hasOrder: Boolean(order),
+      orderId: order?.id,
+      orderRef: order?.order_ref,
+      productName: refinedProductNameSnapshot,
+      paytriggerBrand,
+      inventoryCategory,
+      eligible: Boolean(refinedProductNameSnapshot && pt.isEligible(refinedProductNameSnapshot, inventoryCategory)),
+      firstInstallmentDueDate: firstInstallmentDueDate,
+      deliveryId: updatedDelivery.id,
+      imei: updatedDelivery.product_imei,
+    };
+
+    console.log('[PayTrigger] submitDelivery debug:', paytriggerDebug);
+
+    if (pt.ENABLED() && updatedDelivery.product_imei && order && paytriggerBrand && pt.isEligible(refinedProductNameSnapshot, inventoryCategory)) {
+      const expiration = firstInstallmentDueDate;
+      console.log('[PayTrigger] calling preEnrollImei with:', {
+        imei: updatedDelivery.product_imei,
+        orderRef: order.order_ref,
+        productName: refinedProductNameSnapshot,
+        detectedBrand: paytriggerBrand,
+        expiration,
+      });
+
+      pt.preEnrollImei(
+        updatedDelivery.product_imei,
+        order.order_ref,
+        productNameSnapshot,
+        expiration
+      ).then(async (result) => {
+        console.log('[PayTrigger] preEnrollImei result:', result);
+        if (result?.code === 200 || result?.code === 50015) {
+          let deviceTag = null;
+          let serverState = 500;
+          let enrollmentStatus = 'pre_enrolled';
+
+          if (result?.code === 50015) {
+            try {
+              const dRes = await pt.getDeviceTag(updatedDelivery.product_imei);
+              if (dRes?.code === 200 && dRes.data) {
+                deviceTag = dRes.data.deviceTag || null;
+                serverState = dRes.data.serverState || 500;
+                const stateMap = { 500: 'pre_enrolled', 1000: 'registered', 2000: 'ready_to_activate', 3000: 'active', 4000: 'locked', 5000: 'removable' };
+                enrollmentStatus = stateMap[serverState] || 'pre_enrolled';
+              }
+            } catch (err) {
+              console.error('[PayTrigger] Failed to recover device tag:', err.message);
+            }
+          }
+
+          await prisma.payTriggerDevice.upsert({
+            where: { imei: updatedDelivery.product_imei },
+            update: {
+              order_id: order.id,
+              order_ref: order.order_ref,
+              delivery_id: updatedDelivery.id,
+              product_model: productNameSnapshot,
+              device_tag: deviceTag,
+              server_state: serverState,
+              enrollment_status: enrollmentStatus,
+              expiration,
+              last_sync_at: new Date(),
+              raw_state: result,
+            },
+            create: {
+              imei: updatedDelivery.product_imei,
+              order_id: order.id,
+              order_ref: order.order_ref,
+              delivery_id: updatedDelivery.id,
+              product_model: productNameSnapshot,
+              device_tag: deviceTag,
+              enrollment_status: enrollmentStatus,
+              server_state: serverState,
+              expiration,
+              last_sync_at: new Date(),
+              raw_state: result,
+            },
+          }).catch(e => console.error('[PayTrigger] create/update device failed:', e.message));
+        } else {
+          console.warn('[PayTrigger] pre-enroll returned non-200:', {
+            code: result?.code,
+            message: result?.message,
+            result,
+          });
+        }
+      }).catch(e => console.error('[PayTrigger] pre-enroll failed:', e.message));
+    } else {
+      console.warn('[PayTrigger] block skipped because condition failed:', {
+        enabled: pt.ENABLED(),
+        hasImei: Boolean(updatedDelivery.product_imei),
+        hasOrder: Boolean(order),
+        productName: productNameSnapshot,
+        inventoryCategory,
+        eligible: Boolean(productNameSnapshot && pt.isEligible(productNameSnapshot, inventoryCategory)),
+      });
     }
 
     return res.status(201).json({
@@ -1784,6 +1896,7 @@ const submitSelfPickupDelivery = async (req, res) => {
 
     const purchaser = order.verification?.purchaser;
     const confirmedCustomerName = purchaser?.name || purchaser?.full_name || order.customer_name;
+    let inventoryCategory = null;
     // 4. Start Transaction for Inventory, Delivery, Order and Financials
     const result = await prisma.$transaction(async (tx) => {
       let colorVariant = null;
@@ -1803,6 +1916,7 @@ const submitSelfPickupDelivery = async (req, res) => {
               updated_at: now()
             }
           });
+          inventoryCategory = inventory.category;
           colorVariant = inventory.color_variant || null;
           productNameSnapshot = inventory.product_name;
 
@@ -1901,6 +2015,7 @@ const submitSelfPickupDelivery = async (req, res) => {
     // 5. Build Installment Ledger
     let installmentLedger = null;
     let ledgerUrl = null;
+    let firstInstallmentDueDate = null;
     try {
       const monthlyAmt = planObj?.monthly_amount || planObj?.monthlyAmount || order.monthly_amount || 0;
       const totalMonths = planObj?.months || planObj?.duration || order.months || 0;
@@ -1952,6 +2067,11 @@ const submitSelfPickupDelivery = async (req, res) => {
               paid_at: null,
             });
           }
+        }
+
+        // Capture first installment due date for PayTrigger expiration
+        if (ledgerRows.length > 1 && ledgerRows[1].due_date) {
+          firstInstallmentDueDate = ledgerRows[1].due_date;
         }
 
         const ledgerToken = jwt.sign(
@@ -2089,6 +2209,34 @@ const submitSelfPickupDelivery = async (req, res) => {
       delivery.id,
       io
     );
+
+    // ── PayTrigger: Enroll device only for supported models (non-blocking) ───
+    if (pt.ENABLED() && delivery.product_imei && pt.isEligible(order.product_name, inventoryCategory)) {
+      const expiration = firstInstallmentDueDate || new Date(new Date().setMonth(new Date().getMonth() + 1));
+      pt.preEnrollImei(
+        delivery.product_imei,
+        order.order_ref,
+        order.product_name,
+        expiration
+      ).then(async (result) => {
+        if (result?.code === 200) {
+          await prisma.payTriggerDevice.create({
+            data: {
+              imei: delivery.product_imei,
+              order_id: order.id,
+              order_ref: order.order_ref,
+              delivery_id: delivery.id,
+              product_model: order.product_name,
+              enrollment_status: 'pre_enrolled',
+              server_state: 500,
+              expiration,
+              last_sync_at: new Date(),
+              raw_state: result,
+            },
+          }).catch(e => console.error('[PayTrigger] create device failed:', e.message));
+        }
+      }).catch(e => console.error('[PayTrigger] pre-enroll failed:', e.message));
+    }
 
     return res.status(201).json({
       success: true,

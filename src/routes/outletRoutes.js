@@ -13,6 +13,7 @@ const {
     getReturnExchanges,
     verifyReturnExchangeOtp,
     initiateDirectReturn,
+    resendReturnOtp,
     searchDeliveredOrders,
     getOutletInstallments,
     generateInstallmentOtp,
@@ -41,11 +42,12 @@ router.get('/outlet/cash-history', authenticateJWT, getOutletCashHistory);
 router.get('/outlet/pending-cash-submissions', authenticateJWT, getPendingCashSubmissions);
 router.post('/outlet/resend-cash-otp', authenticateJWT, resendCashSubmissionOTP);
 
-// Return and Exchange Module
+// Return Module
 router.get('/outlet/return-exchanges', authenticateJWT, getReturnExchanges);
 router.post('/outlet/verify-return-otp', authenticateJWT, verifyReturnExchangeOtp);
 router.get('/outlet/search-delivered-orders', authenticateJWT, searchDeliveredOrders);
 router.post('/outlet/initiate-direct-return', authenticateJWT, initiateDirectReturn);
+router.post('/outlet/resend-return-otp', authenticateJWT, resendReturnOtp);
 router.get('/outlet/installments', authenticateJWT, getOutletInstallments);
 router.get('/outlet/installments/due-list', authenticateJWT, getOutletInstallmentsDueList);
 router.patch('/outlet/installments/:id/note', authenticateJWT, updateInstallmentNote);

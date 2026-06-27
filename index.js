@@ -12,6 +12,7 @@ const jwt = require('jsonwebtoken');
 // ────────────────────────────────────────────────
 // Route Imports
 // ────────────────────────────────────────────────
+const paytriggerRoutes = require('./src/routes/paytriggerRoutes');
 const hrRoutes = require('./src/routes/hrRoutes');
 const employeePortalRoutes = require('./src/routes/employeePortalRoutes');
 const smartPayWebhookRoutes = require('./src/routes/smartPayWebhookRoutes');
@@ -42,7 +43,7 @@ const searchRoutes = require('./src/routes/searchRoutes');
 const securityLogRoutes = require('./src/routes/securityLogRoutes');
 const complaintRoutes = require('./src/routes/complaintRoutes');
 const tpsRoutes = require('./src/routes/tpsRoutes');
-
+const { checkOverdueDevices } = require('./src/controllers/paytriggerController');
 
 // JWT secret (must be set in .env)
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -445,6 +446,7 @@ app.get('/', (req, res) => {
 // ────────────────────────────────────────────────
 // Routes
 // ────────────────────────────────────────────────
+app.use('/api', paytriggerRoutes);
 app.use('/api/hr', hrRoutes);
 app.use('/api', employeePortalRoutes);
 app.use('/api/smartpay/webhook', smartPayWebhookRoutes);
@@ -580,6 +582,20 @@ server.listen(PORT, () => {
 
   expirePendingCashSubmissions();
   setInterval(expirePendingCashSubmissions, 30 * 60 * 1000); // every 30 minutes
+
+  // ── PayTrigger overdue device check ───────────────────────────────────
+  const runPayTriggerCheck = async () => {
+    try {
+      const result = await checkOverdueDevices(io);
+      if (result.checked > 0) {
+        console.log(`[PayTrigger] Overdue check: ${result.checked} checked, ${result.locked} locked`);
+      }
+    } catch (err) {
+      console.error('[PayTrigger] Overdue check failed:', err);
+    }
+  };
+  runPayTriggerCheck();
+  setInterval(runPayTriggerCheck, 60 * 60 * 1000); // every hour
 });
 
 // Graceful shutdown

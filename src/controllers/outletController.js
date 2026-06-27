@@ -7,6 +7,7 @@ const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { sendOTP, sendInstallmentPaymentReceipt, sendPartialInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
+const pt = require('../services/paytriggerService');
 
 const now = () => new Date();
 
@@ -833,18 +834,19 @@ const verifyReturnExchangeOtp = async (req, res) => {
  */
 const initiateDirectReturn = async (req, res) => {
     const outlet_id = req.user.outlet_id;
-    const { order_id, type, is_cash_refund, refund_amount } = req.body;
+    const { order_id, is_cash_refund, refund_amount, customer_phone } = req.body;
 
-    if (!order_id || !['Return', 'Exchange'].includes(type)) {
-        return res.status(400).json({ success: false, error: 'Valid order_id and type (Return/Exchange) are required.' });
+    if (!order_id) {
+        return res.status(400).json({ success: false, error: 'order_id is required.' });
     }
 
     try {
-        // ... (fetch order logic unchanged) ...
         const order = await prisma.order.findUnique({
             where: { id: parseInt(order_id) },
             include: {
-                delivery: true,
+                delivery: {
+                    include: { delivery_agent: { select: { full_name: true, phone: true } } }
+                },
                 verification: {
                     include: { purchaser: true }
                 },
@@ -863,9 +865,19 @@ const initiateDirectReturn = async (req, res) => {
             return res.status(403).json({ success: false, error: 'This order does not belong to your outlet.' });
         }
 
-        // Extract data (unchanged)
+        // Duplicate check: no pending or verified return for this order already
+        const existingReturn = await prisma.returnExchange.findFirst({
+            where: { order_id: parseInt(order_id), status: { in: ['pending', 'verified'] } }
+        });
+        if (existingReturn) {
+            const msg = existingReturn.status === 'verified' ? 'already returned' : 'already has a pending return request';
+            return res.status(400).json({ success: false, error: `This order ${msg}.` });
+        }
+
         const cashRecord = order.cash_in_hand?.[0];
-        const deliveryPlan = order.delivery.selected_plan ? (typeof order.delivery.selected_plan === 'string' ? JSON.parse(order.delivery.selected_plan) : order.delivery.selected_plan) : null;
+        const deliveryPlan = order.delivery.selected_plan
+            ? (typeof order.delivery.selected_plan === 'string' ? JSON.parse(order.delivery.selected_plan) : order.delivery.selected_plan)
+            : null;
 
         const deliveredAdvance = cashRecord ? cashRecord.amount : (deliveryPlan?.advance_payment || deliveryPlan?.advance_amount || deliveryPlan?.advancePayment || order.advance_amount);
         const productName = cashRecord?.product_name || deliveryPlan?.productName || order.product_name;
@@ -882,14 +894,13 @@ const initiateDirectReturn = async (req, res) => {
             variant = deliveryPlan?.variant || deliveryPlan?.productVariant || null;
         }
 
-        const otp = Math.floor(1000 + Math.random() * 9000).toString(); // 4-digit OTP
+        const otp = Math.floor(1000 + Math.random() * 9000).toString();
 
-        // Create PENDING record with explicit created_at
         const returnRecord = await prisma.returnExchange.create({
             data: {
                 order_id: parseInt(order_id),
                 outlet_id: outlet_id,
-                type: type,
+                type: 'Return',
                 status: 'pending',
                 otp: otp,
                 product_name: productName,
@@ -903,48 +914,67 @@ const initiateDirectReturn = async (req, res) => {
                 is_cash_refund: !!is_cash_refund,
                 refund_amount: parseFloat(refund_amount) || 0,
                 initiated_by: "Outlet",
-                created_at: now()   // ✅ explicit created_at
+                created_at: now()
             }
         });
 
-        // Send OTP (unchanged)
-        const customerPhone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
-        if (customerPhone) {
+        // Send OTP to provided number or customer's saved number
+        const savedPhone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+        const phoneToUse = customer_phone || savedPhone;
+        if (phoneToUse) {
             try {
-                await sendOTP(customerPhone, otp);
-                console.log(`Sales Return OTP ${otp} sent to customer at ${customerPhone}`);
+                await sendOTP(phoneToUse, otp);
+                console.log(`Sales Return OTP ${otp} sent to ${phoneToUse}`);
             } catch (err) {
-                console.error('Error sending Sales Return OTP to customer:', err);
+                console.error('Error sending Sales Return OTP:', err);
             }
-        }
-
-        // Socket notification (unchanged)
-        const io = req.app.get('io');
-        if (io) {
-            io.to(`outlet_${outlet_id}`).emit('return_exchange_requested', {
-                target_outlet_id: parseInt(outlet_id),
-                record_id: returnRecord.id,
-                officer_name: "Outlet",
-                type,
-                otp,
-                order_ref: order.order_ref,
-                product_name: productName,
-                color: color,
-                variant: variant,
-                delivered_advance: deliveredAdvance,
-                imei: imei || null,
-                is_cash_refund: returnRecord.is_cash_refund,
-                refund_amount: returnRecord.refund_amount
-            });
         }
 
         return res.json({
             success: true,
-            message: `OTP generated and sent to customer's WhatsApp. Please verify to complete the Sales Return.`,
+            message: 'OTP sent to customer. Please verify to complete the return.',
             data: { record_id: returnRecord.id }
         });
     } catch (error) {
         console.error('initiateDirectReturn error:', error);
+        return res.status(500).json({ success: false, error: 'Server error' });
+    }
+};
+
+const resendReturnOtp = async (req, res) => {
+    const outlet_id = req.user.outlet_id;
+    const { record_id, customer_phone } = req.body;
+
+    try {
+        const record = await prisma.returnExchange.findUnique({
+            where: { id: parseInt(record_id) },
+            include: { order: { include: { verification: { include: { purchaser: true } } } } }
+        });
+
+        if (!record) return res.status(404).json({ success: false, error: 'Record not found' });
+        if (record.outlet_id !== outlet_id) return res.status(403).json({ success: false, error: 'Not authorized' });
+        if (record.status === 'verified') return res.status(400).json({ success: false, error: 'Already verified' });
+
+        const newOtp = Math.floor(1000 + Math.random() * 9000).toString();
+
+        await prisma.returnExchange.update({
+            where: { id: record.id },
+            data: { otp: newOtp }
+        });
+
+        const savedPhone = record.order?.verification?.purchaser?.telephone_number || record.order?.whatsapp_number;
+        const phoneToUse = customer_phone || savedPhone;
+        if (phoneToUse) {
+            try {
+                await sendOTP(phoneToUse, newOtp);
+            } catch (err) {
+                console.error('Error resending OTP:', err);
+            }
+        }
+
+        return res.json({ success: true, message: 'OTP resent successfully.' });
+    } catch (error) {
+        console.error('resendReturnOtp error:', error);
         return res.status(500).json({ success: false, error: 'Server error' });
     }
 };
@@ -983,21 +1013,26 @@ const searchDeliveredOrders = async (req, res) => {
     }
 
     try {
-        const orders = await prisma.order.findMany({
-            where: {
-                outlet_id: outlet_id,
-                delivery: { status: 'completed' },
-                OR: [
-                    { order_ref: { contains: query } },
-                    { customer_name: { contains: query } },
-                    { product_name: { contains: query } },
-                    {
-                        delivery: {
-                            product_imei: { contains: query }
-                        }
+        const where = {
+            is_delivered: true,
+            OR: [
+                { order_ref: { contains: query } },
+                { customer_name: { contains: query } },
+                { product_name: { contains: query } },
+                { imei_serial: { contains: query } },
+                {
+                    delivery: {
+                        product_imei: { contains: query }
                     }
-                ]
-            },
+                }
+            ]
+        };
+
+        // Filter by outlet if the user belongs to one
+        if (outlet_id) where.outlet_id = outlet_id;
+
+        const orders = await prisma.order.findMany({
+            where,
             include: {
                 delivery: true,
                 cash_in_hand: {
@@ -1005,7 +1040,8 @@ const searchDeliveredOrders = async (req, res) => {
                     orderBy: { created_at: 'desc' }
                 }
             },
-            take: 10
+            orderBy: { created_at: 'desc' },
+            take: 20
         });
 
         // Map through orders to provide explicit "delivered" fields for the UI
@@ -1316,6 +1352,7 @@ const getOutletInstallments = async (req, res) => {
                     name: order.recovery_officer.full_name,
                     phone: order.recovery_officer.phone
                 } : null,
+                paytrigger_status: ledgerModel?.paytrigger_status || null,
                 _consumerNum: consumerNum, // internal for TPS lookup
             };
         });
@@ -1533,6 +1570,17 @@ const verifyInstallmentPayment = async (req, res) => {
                 dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
                 ledgerUrl: ledger.token ? `${ledger.token}` : null
             }).catch(err => console.error('Wati Reminder Error:', err));
+        }
+
+        // ── PayTrigger: Update repayment info if fully paid (non-blocking) ──
+        if (pt.ENABLED() && totalPaid >= dueAmount && imeiSerial) {
+            prisma.payTriggerDevice.findFirst({ where: { imei: imeiSerial } }).then(device => {
+                if (device) {
+                    pt.updateRepayInfo(imeiSerial, order.order_ref, 'fully_paid')
+                        .then(r => console.log('[PayTrigger] updateRepayInfo ok:', r?.code, r?.message))
+                        .catch(e => console.error('[PayTrigger] updateRepayInfo failed:', e.message));
+                }
+            }).catch(e => console.error('[PayTrigger] device lookup failed:', e.message));
         }
 
         return res.json({ success: true, message: 'Payment processed successfully' });
@@ -2078,6 +2126,7 @@ const getOutletInstallmentsDueList = async (req, res) => {
                             consumer_number: consumerNum,
                             smartpay_consumer_number: smartpayConsumerNum,
                             consumer_bill_status: allConsumers.find(c => c.consumer_number === consumerNum)?.bill_status || null,
+                            paytrigger_status: ledgerModel?.paytrigger_status || null,
                         recovery_officer: order.recovery_officer ? {
                             id: order.recovery_officer.id,
                             name: order.recovery_officer.full_name,
@@ -2328,6 +2377,7 @@ module.exports = {
     getReturnExchanges,
     verifyReturnExchangeOtp,
     initiateDirectReturn,
+    resendReturnOtp,
     searchDeliveredOrders,
     getOutletInstallments,
     generateInstallmentOtp,
