@@ -3,24 +3,28 @@ const router = express.Router();
 const upload = require('../config/multer-local');
 const fixUploadPath = require('../middlewares/fixUploadPath');
 const {
-    getAllRecoveryOfficers,
-    getRecoveryOfficerStats,
-    getRecoveryCustomers,
-    getCollectionStats,
-    getDueOverdueInstallments,
-    submitCollections,
-    generateInstallmentOtp,
-    submitInstallment,
-    logRecoveryVisit,
-    getOrderRecoveryVisits,
-    replaceRecoveryVisitPhoto,
-    getRecoveryDashboardStats,
-    getRecoveryFuelCharges
+  getAllRecoveryOfficers,
+  getRecoveryOfficerStats,
+  getRecoveryCustomers,
+  getCollectionStats,
+  getDueOverdueInstallments,
+  submitCollections,
+  generateInstallmentOtp,
+  submitInstallment,
+  logRecoveryVisit,
+  getOrderRecoveryVisits,
+  replaceRecoveryVisitPhoto,
+  getRecoveryDashboardStats,
+  getRecoveryFuelCharges,
+  getRecoveryCollectedPayments,
+  getRecoveryVisits
 } = require('../controllers/recoveryController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
 router.get('/dashboard-stats', authenticateJWT, getRecoveryDashboardStats);
 router.get('/fuel-charges', authenticateJWT, getRecoveryFuelCharges);
+router.get('/collected-payments', authenticateJWT, getRecoveryCollectedPayments);
+router.get('/visits', authenticateJWT, getRecoveryVisits);
 router.get('/officers', authenticateJWT, getAllRecoveryOfficers);
 router.get('/officers/:id/stats', authenticateJWT, getRecoveryOfficerStats);
 
@@ -37,7 +41,7 @@ router.post(
   authenticateJWT,
   upload.fields([
     { name: 'visit_photos', maxCount: 5 },
-    { name: 'profile_photo', maxCount: 1 }
+    { name: 'profile_photo', maxCount: 5 }
   ]),
   fixUploadPath,
   submitInstallment
@@ -49,7 +53,7 @@ router.post(
   authenticateJWT,
   upload.fields([
     { name: 'visit_photos', maxCount: 5 },
-    { name: 'profile_photo', maxCount: 1 }
+    { name: 'profile_photo', maxCount: 5 }
   ]),
   fixUploadPath,
   logRecoveryVisit
