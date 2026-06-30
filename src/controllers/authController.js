@@ -205,14 +205,89 @@ const verifyLoginOTP = async (req, res) => {
       return res.status(403).json({ success: false, error: { code: 403, message: 'Account is not active.' } });
     }
 
-    const updateData = {};
+    // MULTI-DEVICE RESTRICTION:
+    // If the user already has an active session_token (someone is logged in),
+    // AND the incoming device_id is different from the stored one,
+    // initiate a device-switch request instead of logging in directly.
+    //
+    // We use session_token (not device_id) as the source of truth because
+    // device_id may be null for users who registered before this feature.
+    //
+    // Edge case: if device_id is missing/unknown, treat it as a different device
+    // to be safe (always require approval if someone is already logged in).
+    const newDevice = device_id || null;
+    const isAlreadyLoggedIn = !!user.session_token;
+    const isSameDevice = newDevice && user.device_id && user.device_id === newDevice;
+
+    if (isAlreadyLoggedIn && !isSameDevice) {
+      // Create DeviceLoginRequest
+      const pendingRequest = await prisma.deviceLoginRequest.create({
+        data: {
+          user_id: user.id,
+          new_device_id: newDevice,
+          new_fcm_token: fcm_token || null,
+          status: 'pending',
+          created_at: new Date()
+        }
+      });
+
+      // Emit socket.io event to user room
+      const io = req.app.get('io');
+      if (io) {
+        io.to(`user_${user.id}`).emit('device_login_request', {
+          request_id: pendingRequest.id,
+          new_device_id: newDevice,
+          message: 'This phone is trying to login your account.'
+        });
+      }
+
+      // Also trigger a push notification via FCM
+      if (user.fcm_token) {
+        try {
+          const admin = require('firebase-admin');
+          if (admin.apps.length > 0) {
+            await admin.messaging().send({
+              token: user.fcm_token,
+              notification: {
+                title: 'Login Request',
+                body: 'This phone is trying to login your account.'
+              },
+              data: {
+                click_action: 'FLUTTER_NOTIFICATION_CLICK',
+                type: 'device_login_request',
+                requestId: String(pendingRequest.id)
+              }
+            });
+            console.log(`Sent login request FCM to user ${user.id}`);
+          }
+        } catch (fcmErr) {
+          console.error('FCM send failed:', fcmErr);
+        }
+      }
+
+      return res.json({
+        success: true,
+        device_request_pending: true,
+        requestId: pendingRequest.id,
+        message: 'This phone is trying to login your account. Approve from your current active device.'
+      });
+    }
+
+    // Direct login: Generate random session ID (64 chars hex)
+    const crypto = require('crypto');
+    const sessionToken = crypto.randomBytes(32).toString('hex');
+
+    const updateData = {
+      session_token: sessionToken,
+      updated_at: new Date()
+    };
     if (device_id) updateData.device_id = device_id;
     if (fcm_token) updateData.fcm_token = fcm_token;
 
-    if (Object.keys(updateData).length > 0) {
-      updateData.updated_at = now();
-      await prisma.user.update({ where: { id: user.id }, data: updateData });
-    }
+    await prisma.user.update({
+      where: { id: user.id },
+      data: updateData
+    });
 
     const payload = {
       id: user.id,
@@ -224,6 +299,7 @@ const verifyLoginOTP = async (req, res) => {
       role: user.role.name,
       outlet_id: user.outlet_id,
       permissions: user.permissions_json ? user.permissions_json : null,
+      sid: sessionToken
     };
 
     const token = jwt.sign(payload, jwtSecret);
@@ -365,7 +441,7 @@ const signup = async (req, res) => {
         outlet_id: outlet_id ? parseInt(outlet_id) : null,
         status: 'active',
         created_at: now(),
-        updated_at: now() 
+        updated_at: now()
       },
       include: { role: true, outlet: true },
     });
@@ -661,7 +737,7 @@ const editUser = async (req, res) => {
       ...(bio && { bio }),
       ...(image && { image }),
       ...(coverImage && { coverImage }),
-      updated_at: now()  
+      updated_at: now()
     };
 
     if (outlet_id !== undefined) {
@@ -725,10 +801,10 @@ const updateUserPermissions = async (req, res) => {
 
     const updated = await prisma.user.update({
       where: { id: parseInt(userId) },
-      data: { 
+      data: {
         permissions_json: permissions_json,
         updated_at: now()
-       },
+      },
       include: { role: true },
     });
 
@@ -836,7 +912,7 @@ const updateProfile = async (req, res) => {
   }
 
   try {
-     const updateData = { updated_at: now() }; 
+    const updateData = { updated_at: now() };
 
     if (full_name !== undefined) updateData.full_name = full_name.trim();
     if (email !== undefined) updateData.email = email ? email.toLowerCase().trim() : null;
@@ -1047,12 +1123,186 @@ const getRecoveryOfficers = async (req, res) => {
 
 
 
+const getDeviceLoginRequest = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const request = await prisma.deviceLoginRequest.findUnique({
+      where: { id: parseInt(id) },
+      include: { user: { include: { role: true } } }
+    });
+
+    if (!request) {
+      return res.status(404).json({ success: false, error: { code: 404, message: 'Device login request not found.' } });
+    }
+
+    if (request.status === 'approved') {
+      const crypto = require('crypto');
+      const sessionToken = crypto.randomBytes(32).toString('hex');
+
+      const user = await prisma.user.update({
+        where: { id: request.user_id },
+        data: {
+          device_id: request.new_device_id,
+          fcm_token: request.new_fcm_token,
+          session_token: sessionToken,
+          updated_at: new Date()
+        },
+        include: { role: true }
+      });
+
+      await prisma.deviceLoginRequest.update({
+        where: { id: request.id },
+        data: {
+          status: 'completed',
+          resolved_at: new Date()
+        }
+      });
+
+      const payload = {
+        id: user.id,
+        full_name: user.full_name,
+        email: user.email,
+        username: user.username,
+        phone: user.phone,
+        role_id: user.role_id,
+        role: user.role.name,
+        outlet_id: user.outlet_id,
+        permissions: user.permissions_json ? user.permissions_json : null,
+        sid: sessionToken
+      };
+
+      const token = jwt.sign(payload, jwtSecret);
+
+      return res.json({
+        success: true,
+        status: 'approved',
+        token,
+        user: payload,
+        message: 'Login approved and completed.'
+      });
+    }
+
+    return res.json({
+      success: true,
+      status: request.status,
+      message: `Device login request is currently ${request.status}`
+    });
+  } catch (error) {
+    console.error('getDeviceLoginRequest error:', error);
+    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
+  }
+};
+
+const respondDeviceLoginRequest = async (req, res) => {
+  const { id } = req.params;
+  const { approved } = req.body;
+
+  if (approved === undefined) {
+    return res.status(400).json({ success: false, error: { code: 400, message: 'Approval decision is required.' } });
+  }
+
+  try {
+    const request = await prisma.deviceLoginRequest.findUnique({
+      where: { id: parseInt(id) },
+      include: { user: true }
+    });
+
+    if (!request) {
+      return res.status(404).json({ success: false, error: { code: 404, message: 'Device login request not found.' } });
+    }
+
+    if (request.status !== 'pending') {
+      return res.status(400).json({ success: false, error: { code: 400, message: `Request already resolved with status ${request.status}` } });
+    }
+
+    if (approved) {
+      await prisma.deviceLoginRequest.update({
+        where: { id: request.id },
+        data: {
+          status: 'approved',
+          resolved_at: new Date()
+        }
+      });
+
+      const io = req.app.get('io');
+      if (io) {
+        io.to(`user_${request.user_id}`).emit('force_logout', {
+          message: 'Logged out because your account was logged in on another device.'
+        });
+      }
+
+      if (request.user.fcm_token) {
+        try {
+          const admin = require('firebase-admin');
+          if (admin.apps.length > 0) {
+            await admin.messaging().send({
+              token: request.user.fcm_token,
+              notification: {
+                title: 'Logged Out',
+                body: 'Your account was logged in on another device.'
+              },
+              data: {
+                click_action: 'FLUTTER_NOTIFICATION_CLICK',
+                type: 'force_logout',
+                message: 'Your account was logged in on another device.'
+              }
+            });
+            console.log(`Sent force_logout FCM to user ${request.user_id}`);
+          }
+        } catch (fcmErr) {
+          console.error('FCM force_logout push failed:', fcmErr);
+        }
+      }
+
+      return res.json({ success: true, message: 'Login request approved.' });
+    } else {
+      await prisma.deviceLoginRequest.update({
+        where: { id: request.id },
+        data: {
+          status: 'denied',
+          resolved_at: new Date()
+        }
+      });
+
+      return res.json({ success: true, message: 'Login request denied.' });
+    }
+  } catch (error) {
+    console.error('respondDeviceLoginRequest error:', error);
+    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
+  }
+};
+
+const logoutUser = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    await prisma.user.update({
+      where: { id: userId },
+      data: {
+        session_token: null,
+        fcm_token: null,
+        updated_at: new Date()
+      }
+    });
+
+    return res.json({ success: true, message: 'Logged out successfully.' });
+  } catch (error) {
+    console.error('logoutUser error:', error);
+    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
+  }
+};
+
 module.exports = {
   // OTP Login functions
   sendLoginOTP,
   verifyLoginOTP,
   sendWebLoginOTP,
   verifyWebLoginOTP,
+
+  // Device login requests
+  getDeviceLoginRequest,
+  respondDeviceLoginRequest,
+  logoutUser,
 
   // Existing functions
   signup,

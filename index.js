@@ -87,7 +87,7 @@ io.on('connection', (socket) => {
       // Persist in DB
       await prisma.user.update({
         where: { id: officerId },
-        data: { 
+        data: {
           current_active_verification_id: verificationId,
           updated_at: new Date(),
         },
@@ -117,7 +117,7 @@ io.on('connection', (socket) => {
       // Persist in DB
       await prisma.user.update({
         where: { id: officerId },
-        data: { 
+        data: {
           current_active_verification_id: null,
           updated_at: new Date(),
         },
@@ -197,10 +197,10 @@ io.on('connection', (socket) => {
       try {
         await prisma.user.update({
           where: { id: officerId },
-          data: { 
-            is_online: true, 
+          data: {
+            is_online: true,
             last_online_at: new Date(),
-            updated_at: new Date(), 
+            updated_at: new Date(),
           },
         });
 
@@ -210,10 +210,10 @@ io.on('connection', (socket) => {
 
         if (!session) {
           session = await prisma.officerSession.create({
-            data: { 
-              officer_id: officerId, 
+            data: {
+              officer_id: officerId,
               start_time: new Date(),
-              created_at: new Date(), 
+              created_at: new Date(),
             },
           });
         }
@@ -402,7 +402,8 @@ io.on('connection', (socket) => {
       // Mark user offline
       await prisma.user.update({
         where: { id: officerId },
-        data: { is_online: false, 
+        data: {
+          is_online: false,
           last_online_at: new Date(),
           updated_at: new Date(),
         },
@@ -580,6 +581,88 @@ server.listen(PORT, () => {
 
   expirePendingCashSubmissions();
   setInterval(expirePendingCashSubmissions, 30 * 60 * 1000); // every 30 minutes
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // MIDNIGHT safety-net cron: runs at 00:00 Asia/Karachi
+  // 1. Closes any OfficerSession still open (end_time = null)
+  // 2. Clears stale pending DeviceLoginRequests
+  // 3. Nullifies session_token for all officers so they must re-login
+  // ─────────────────────────────────────────────────────────────────────────
+  let cron;
+  try { cron = require('node-cron'); } catch (_) { cron = null; }
+
+  if (cron) {
+    const { clearUserSessionCache } = require('./src/middlewares/authMiddleware');
+
+    cron.schedule('0 0 * * *', async () => {
+      console.log('[MidnightCron] Running midnight safety-net job...');
+      const midnight = new Date();
+
+      try {
+        // 1. Close all open officer sessions
+        const openSessions = await prisma.officerSession.findMany({
+          where: { end_time: null },
+          select: { id: true, officer_id: true, start_time: true }
+        });
+
+        if (openSessions.length > 0) {
+          const ids = openSessions.map(s => s.id);
+          await prisma.officerSession.updateMany({
+            where: { id: { in: ids } },
+            data: {
+              end_time: midnight,
+              duration_minutes: 0
+            }
+          });
+          console.log(`[MidnightCron] Closed ${ids.length} stale officer session(s).`);
+        }
+
+        // 2. Expire pending device login requests
+        const expired = await prisma.deviceLoginRequest.updateMany({
+          where: { status: 'pending' },
+          data: {
+            status: 'denied',
+            resolved_at: midnight
+          }
+        });
+        if (expired.count > 0) {
+          console.log(`[MidnightCron] Expired ${expired.count} pending device login request(s).`);
+        }
+
+        // 3. Revoke session tokens for all officers (role_id 1,2,3) so they
+        //    must re-login for the new day; also clear the in-memory cache.
+        const officers = await prisma.user.findMany({
+          where: { role_id: { in: [1, 2, 3] }, session_token: { not: null } },
+          select: { id: true }
+        });
+        if (officers.length > 0) {
+          await prisma.user.updateMany({
+            where: { id: { in: officers.map(o => o.id) } },
+            data: { session_token: null }
+          });
+          officers.forEach(o => clearUserSessionCache(o.id));
+          console.log(`[MidnightCron] Revoked session tokens for ${officers.length} officer(s).`);
+        }
+
+        // 4. Notify officers via Socket
+        const officerIds = openSessions.map(s => s.officer_id);
+        const uniqueIds = [...new Set(officerIds)];
+        uniqueIds.forEach(id => {
+          io.to(`user_${id}`).emit('midnightAutoLogout', {
+            message: 'Shift ended at midnight. Please login again for the new day.'
+          });
+        });
+
+        console.log('[MidnightCron] Midnight safety-net job completed.');
+      } catch (err) {
+        console.error('[MidnightCron] Error during midnight job:', err);
+      }
+    }, { timezone: 'Asia/Karachi' });
+
+    console.log('[MidnightCron] Midnight cron job scheduled (Asia/Karachi).');
+  } else {
+    console.warn('[MidnightCron] node-cron not available; midnight safety-net disabled.');
+  }
 });
 
 // Graceful shutdown
