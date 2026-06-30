@@ -346,36 +346,78 @@ const getRecoveryCustomers = async (req, res) => {
 };
 
 
+// ── Cash In Hand (Recovery Officer day book) ────────────────────────────────
+// `cashInHand` is always the officer's current unsubmitted running balance
+// (never date-bound). When `filter`/`startDate`/`endDate` query params are
+// given, `recentCollections` is the full, date-filtered cash log; without
+// them it falls back to the last 10 entries (legacy dashboard widget call).
 const getCollectionStats = async (req, res) => {
   const officerId = req.user.id;
+  const { filter, startDate, endDate } = req.query;
 
   try {
-    const cashEntries = await prisma.cashInHand.findMany({
+    const pendingEntries = await prisma.cashInHand.findMany({
       where: {
         officer_id: officerId,
         status: 'pending',
       }
     });
 
-    const totalCashInHand = cashEntries.reduce((sum, entry) => {
+    const totalCashInHand = pendingEntries.reduce((sum, entry) => {
       return sum + (entry.amount - (entry.submitted_amount || 0));
     }, 0);
 
-    const recentCollections = await prisma.cashInHand.findMany({
-      where: { officer_id: officerId },
+    let start, end;
+    if (filter) {
+      const nowDt = new Date();
+      if (filter === 'today') {
+        start = new Date(nowDt); start.setHours(0, 0, 0, 0);
+        end = new Date(nowDt); end.setHours(23, 59, 59, 999);
+      } else if (filter === 'month') {
+        start = new Date(nowDt.getFullYear(), nowDt.getMonth(), 1, 0, 0, 0, 0);
+        end = new Date(nowDt.getFullYear(), nowDt.getMonth() + 1, 0, 23, 59, 59, 999);
+      } else if (filter === 'custom' && startDate && endDate) {
+        start = new Date(startDate); start.setHours(0, 0, 0, 0);
+        end = new Date(endDate); end.setHours(23, 59, 59, 999);
+      }
+    }
+
+    const collections = await prisma.cashInHand.findMany({
+      where: {
+        officer_id: officerId,
+        ...(start && end ? { created_at: { gte: start, lte: end } } : {})
+      },
       orderBy: { created_at: 'desc' },
-      take: 10,
+      take: filter ? undefined : 10,
       include: { order: { select: { order_ref: true } } }
     });
+
+    const totalCollected = collections.reduce((s, c) => s + c.amount, 0);
+    const totalSubmitted = collections.reduce((s, c) => s + (c.submitted_amount || 0), 0);
 
     return res.json({
       success: true,
       data: {
+        filter: filter || null,
+        dateRange: start && end ? { start, end } : null,
         cashInHand: totalCashInHand,
-        recentCollections: recentCollections.map(c => ({
-          ...c,
-          customer_name: c.customer_name,
-          paymentType: 'installment'
+        totalCollected,
+        totalSubmitted,
+        count: collections.length,
+        recentCollections: collections.map(c => ({
+          id: c.id,
+          orderId: c.order_id,
+          orderRef: c.order?.order_ref || null,
+          customerName: c.customer_name,
+          productName: c.product_name,
+          amount: c.amount,
+          submittedAmount: c.submitted_amount || 0,
+          remainingAmount: c.amount - (c.submitted_amount || 0),
+          status: c.status,
+          paymentMethod: c.payment_method,
+          cashType: c.cash_type,
+          createdAt: c.created_at,
+          updatedAt: c.updated_at
         }))
       }
     });
@@ -1398,7 +1440,7 @@ const getRecoveryFuelCharges = async (req, res) => {
 // the officer currently assigned, e.g. after a reassignment).
 const getRecoveryCollectedPayments = async (req, res) => {
   try {
-    const { filter = 'today', startDate, endDate } = req.query;
+    const { filter = 'today', startDate, endDate, paymentMethod, search } = req.query;
     const userId = req.user?.id;
 
     const nowDt = new Date();
@@ -1475,10 +1517,24 @@ const getRecoveryCollectedPayments = async (req, res) => {
       : [];
     const officerNameMap = officers.reduce((acc, o) => { acc[o.id] = o.full_name; return acc; }, {});
 
-    const payments = rawEntries.map(e => ({
+    let payments = rawEntries.map(e => ({
       ...e,
       officerName: e.officerId != null ? (officerNameMap[e.officerId] || 'Unknown') : 'Unknown'
     }));
+
+    if (paymentMethod === 'cash') {
+      payments = payments.filter(p => isCashMethod(p.paymentMethod));
+    } else if (paymentMethod === 'online') {
+      payments = payments.filter(p => !isCashMethod(p.paymentMethod));
+    }
+
+    if (search && search.trim()) {
+      const q = search.trim().toLowerCase();
+      payments = payments.filter(p =>
+        (p.customerName || '').toLowerCase().includes(q) ||
+        (p.orderRef || '').toLowerCase().includes(q)
+      );
+    }
 
     payments.sort((a, b) => new Date(b.paidAt) - new Date(a.paidAt));
 
@@ -1538,6 +1594,9 @@ const getRecoveryVisits = async (req, res) => {
           select: {
             order_ref: true,
             customer_name: true,
+            address: true,
+            area: true,
+            city: true,
             verification: {
               include: {
                 purchaser: {
@@ -1557,14 +1616,22 @@ const getRecoveryVisits = async (req, res) => {
       orderId: v.order_id,
       orderRef: v.order?.order_ref || 'N/A',
       customerName: v.order?.verification?.purchaser?.name || v.order?.customer_name || 'Unknown',
+      address: v.order?.address || null,
+      area: v.order?.area || null,
+      city: v.order?.city || null,
       visitTime: v.visit_time,
       paymentCollected: v.payment_collected,
       amountCollected: v.amount_collected || 0,
+      customerFeedback: v.customer_feedback,
       notes: v.visit_notes,
+      fuelCharges: v.fuel_charges || 0,
       latitude: v.latitude,
       longitude: v.longitude,
       photos: v.photos.map(p => p.file_url)
     }));
+
+    const totalRecoveredAmount = transformedVisits.reduce((s, v) => s + (v.amountCollected || 0), 0);
+    const paidVisits = transformedVisits.filter(v => v.paymentCollected).length;
 
     return res.json({
       success: true,
@@ -1572,6 +1639,9 @@ const getRecoveryVisits = async (req, res) => {
         filter,
         dateRange: { start, end },
         count: transformedVisits.length,
+        totalRecoveredAmount,
+        paidVisits,
+        unpaidVisits: transformedVisits.length - paidVisits,
         visits: transformedVisits
       }
     });

@@ -33,6 +33,7 @@ model User {
   cnic                           String?
   phone                          String?
   device_id                      String?
+  session_token                  String?                   @db.VarChar(64)
   status                         String                    @default("active")
   created_at                     DateTime                  @default(now())
   updated_at                     DateTime                  @updatedAt
@@ -86,12 +87,31 @@ model User {
   recovery_rankings              RecoveryRanking[]
   officer_transactions           OfficerTransaction[]      @relation("OfficerTransactions")
   consumer_numbers               ConsumerNumber[]          @relation("UserConsumerNumbers")
+  device_login_requests          DeviceLoginRequest[]
 
   @@index([role_id])
   @@index([is_online])
   @@index([role_id, is_online])
   @@index([last_online_at])
   @@index([outlet_id])
+}
+
+// A pending "new device wants to login" handoff. Created when a user already
+// has an active device and logs in from a different one; resolved by the
+// existing device approving/denying, or auto-approved after a timeout.
+model DeviceLoginRequest {
+  id             Int       @id @default(autoincrement())
+  user_id        Int
+  new_device_id  String
+  new_fcm_token  String?   @db.VarChar(255)
+  status         String    @default("pending") // pending | approved | denied | completed
+  created_at     DateTime  @default(now())
+  resolved_at    DateTime?
+  user           User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([status])
+  @@map("device_login_requests")
 }
 
 model Role {
