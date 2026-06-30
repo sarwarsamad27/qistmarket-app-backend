@@ -493,13 +493,19 @@ const logRecoveryVisit = async (req, res) => {
 
   // Extract uploaded files
   const visitPhotos = req.files?.['visit_photos'] || [];
-  const profilePhotoFile = req.files?.['profile_photo']?.[0] || null;
+  const profilePhotos = req.files?.['profile_photo'] || [];
 
   // Validate photo counts
   if (visitPhotos.length > 5) {
     return res.status(400).json({
       success: false,
       error: { code: 400, message: 'Maximum 5 visit photos allowed' }
+    });
+  }
+  if (profilePhotos.length > 5) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 400, message: 'Maximum 5 customer photos allowed' }
     });
   }
 
@@ -535,16 +541,20 @@ const logRecoveryVisit = async (req, res) => {
       // Prepare photo records for batch insert
       const photoRecords = [];
 
-      // Add profile photo (from upload or from verification)
-      let profilePhotoUrl = profilePhotoFile?.url || null;
-      if (!profilePhotoUrl && order.verification?.documents?.[0]?.file_url) {
-        profilePhotoUrl = order.verification.documents[0].file_url;
-      }
-
-      if (profilePhotoUrl) {
+      // Add profile photo(s) (from upload, fallback to verification photo)
+      if (profilePhotos.length > 0) {
+        profilePhotos.forEach((file) => {
+          photoRecords.push({
+            recovery_visit_id: visit.id,
+            file_url: file.url,
+            photo_type: 'profile',
+            uploaded_at: now()   // ✅ explicit uploaded_at
+          });
+        });
+      } else if (order.verification?.documents?.[0]?.file_url) {
         photoRecords.push({
           recovery_visit_id: visit.id,
-          file_url: profilePhotoUrl,
+          file_url: order.verification.documents[0].file_url,
           photo_type: 'profile',
           uploaded_at: now()   // ✅ explicit uploaded_at
         });
@@ -586,13 +596,19 @@ const submitInstallment = async (req, res) => {
 
   // Extract uploaded files
   const visitPhotos = req.files?.['visit_photos'] || [];
-  const profilePhotoFile = req.files?.['profile_photo']?.[0] || null;
+  const profilePhotos = req.files?.['profile_photo'] || [];
 
   // Validate photo counts
   if (visitPhotos.length > 5) {
     return res.status(400).json({
       success: false,
       error: { code: 400, message: 'Maximum 5 visit photos allowed' }
+    });
+  }
+  if (profilePhotos.length > 5) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 400, message: 'Maximum 5 customer photos allowed' }
     });
   }
 
@@ -708,16 +724,14 @@ const submitInstallment = async (req, res) => {
       // Prepare photo records for batch insert
       const photoRecords = [];
 
-      let profilePhotoUrl = profilePhotoFile?.url || null;
-
-      if (profilePhotoUrl) {
+      profilePhotos.forEach((file) => {
         photoRecords.push({
           recovery_visit_id: visit.id,
-          file_url: profilePhotoUrl,
+          file_url: file.url,
           photo_type: 'profile',
           uploaded_at: now()   // ✅ explicit uploaded_at
         });
-      }
+      });
 
       // Add visit photos
       visitPhotos.forEach((file, index) => {
@@ -994,6 +1008,18 @@ const getRecoveryDashboardStats = async (req, res) => {
       rejected: calcIncrement(rejectedCount, yesterdayCounts['rejected']),
     };
 
+    // Visit Activity Metrics
+    const visits = await prisma.recoveryVisit.findMany({
+      where: { officer_id: userId, visit_time: dateFilter },
+      select: { order_id: true, payment_collected: true }
+    });
+
+    const visitStats = {
+      totalVisits: visits.length,
+      uniqueCustomersVisited: new Set(visits.map(v => v.order_id)).size,
+      recoverySuccessCount: new Set(visits.filter(v => v.payment_collected).map(v => v.order_id)).size
+    };
+
     // Rankings
     const rankingPeriod = filter === 'custom' ? 'month' : filter;
 
@@ -1254,6 +1280,7 @@ const getRecoveryDashboardStats = async (req, res) => {
           count: blacklistAccounts.length,
           accounts: blacklistAccounts
         },
+        visitStats,
         targetTracking: {
           achievedAmount,
           targetAmount: monthlyTarget,
@@ -1364,9 +1391,201 @@ const getRecoveryFuelCharges = async (req, res) => {
   }
 };
 
+// ── Collected Payments (Recovery Officer) ──────────────────────────────────
+// Every installment payment recorded against orders currently assigned to
+// this officer, filtered by paid_at date range — with payment method and
+// the officer who actually collected each one (collected_by may differ from
+// the officer currently assigned, e.g. after a reassignment).
+const getRecoveryCollectedPayments = async (req, res) => {
+  try {
+    const { filter = 'today', startDate, endDate } = req.query;
+    const userId = req.user?.id;
+
+    const nowDt = new Date();
+    let start, end;
+
+    if (filter === 'today') {
+      start = new Date(nowDt); start.setHours(0, 0, 0, 0);
+      end = new Date(nowDt); end.setHours(23, 59, 59, 999);
+    } else if (filter === 'month') {
+      start = new Date(nowDt.getFullYear(), nowDt.getMonth(), 1, 0, 0, 0, 0);
+      end = new Date(nowDt.getFullYear(), nowDt.getMonth() + 1, 0, 23, 59, 59, 999);
+    } else if (filter === 'custom' && startDate && endDate) {
+      start = new Date(startDate); start.setHours(0, 0, 0, 0);
+      end = new Date(endDate); end.setHours(23, 59, 59, 999);
+    } else {
+      start = new Date(nowDt); start.setHours(0, 0, 0, 0);
+      end = new Date(nowDt); end.setHours(23, 59, 59, 999);
+    }
+
+    const orders = await prisma.order.findMany({
+      where: {
+        recovery_officer_id: userId,
+        status: { in: ['pending', 'in_progress', 'delivered'] },
+        is_delivered: true
+      },
+      include: {
+        installment_ledger: true,
+        verification: { include: { purchaser: true } }
+      }
+    });
+
+    const isCashMethod = (m) => ['cash', 'recovery_cash', 'recovery cash'].includes((m || '').toLowerCase());
+
+    const rawEntries = [];
+
+    orders.forEach(order => {
+      if (!order.installment_ledger?.ledger_rows) return;
+
+      let rawRows = order.installment_ledger.ledger_rows;
+      if (typeof rawRows === 'string') rawRows = JSON.parse(rawRows);
+      if (!Array.isArray(rawRows)) return;
+
+      const normalized = getNormalizedLedger(rawRows);
+
+      normalized.rows.forEach(row => {
+        const paymentAmount = parseFloat(row.paid_amount || 0);
+        if (paymentAmount <= 0) return;
+
+        const paidAt = row.paid_at ? new Date(row.paid_at) : null;
+        if (!paidAt || isNaN(paidAt.getTime())) return;
+        if (paidAt < start || paidAt > end) return;
+
+        rawEntries.push({
+          orderId: order.id,
+          orderRef: order.order_ref || '',
+          customerName: order.verification?.purchaser?.name || order.customer_name || '',
+          itemName: order.product_name || '',
+          monthNumber: row.month ?? 0,
+          amount: paymentAmount,
+          paymentMethod: row.payment_method || '',
+          officerId: row.collected_by != null ? Number(row.collected_by) : null,
+          paidAt: paidAt.toISOString()
+        });
+      });
+    });
+
+    // Resolve officer names for whoever actually collected each payment
+    const officerIds = [...new Set(rawEntries.map(e => e.officerId).filter(Boolean))];
+    const officers = officerIds.length > 0
+      ? await prisma.user.findMany({
+        where: { id: { in: officerIds } },
+        select: { id: true, full_name: true }
+      })
+      : [];
+    const officerNameMap = officers.reduce((acc, o) => { acc[o.id] = o.full_name; return acc; }, {});
+
+    const payments = rawEntries.map(e => ({
+      ...e,
+      officerName: e.officerId != null ? (officerNameMap[e.officerId] || 'Unknown') : 'Unknown'
+    }));
+
+    payments.sort((a, b) => new Date(b.paidAt) - new Date(a.paidAt));
+
+    const totalAmount = payments.reduce((s, p) => s + p.amount, 0);
+    const cashAmount = payments.filter(p => isCashMethod(p.paymentMethod)).reduce((s, p) => s + p.amount, 0);
+    const onlineAmount = totalAmount - cashAmount;
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        filter,
+        dateRange: { start, end },
+        totalAmount,
+        cashAmount,
+        onlineAmount,
+        count: payments.length,
+        payments
+      }
+    });
+  } catch (error) {
+    console.error('getRecoveryCollectedPayments error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error', debug: error.message });
+  }
+};
+
+const getRecoveryVisits = async (req, res) => {
+  try {
+    const { filter = 'today', startDate, endDate } = req.query;
+    const userId = req.user.id;
+
+    const nowDt = new Date();
+    let start, end;
+
+    if (filter === 'today') {
+      start = new Date(nowDt); start.setHours(0, 0, 0, 0);
+      end = new Date(nowDt); end.setHours(23, 59, 59, 999);
+    } else if (filter === 'month') {
+      start = new Date(nowDt.getFullYear(), nowDt.getMonth(), 1, 0, 0, 0, 0);
+      end = new Date(nowDt.getFullYear(), nowDt.getMonth() + 1, 0, 23, 59, 59, 999);
+    } else if (filter === 'custom' && startDate && endDate) {
+      start = new Date(startDate); start.setHours(0, 0, 0, 0);
+      end = new Date(endDate); end.setHours(23, 59, 59, 999);
+    } else {
+      start = new Date(nowDt); start.setHours(0, 0, 0, 0);
+      end = new Date(nowDt); end.setHours(23, 59, 59, 999);
+    }
+
+    const dateFilter = { gte: start, lte: end };
+
+    const visits = await prisma.recoveryVisit.findMany({
+      where: {
+        officer_id: userId,
+        visit_time: dateFilter
+      },
+      include: {
+        order: {
+          select: {
+            order_ref: true,
+            customer_name: true,
+            verification: {
+              include: {
+                purchaser: {
+                  select: { name: true }
+                }
+              }
+            }
+          }
+        },
+        photos: true
+      },
+      orderBy: { visit_time: 'desc' }
+    });
+
+    const transformedVisits = visits.map(v => ({
+      id: v.id,
+      orderId: v.order_id,
+      orderRef: v.order?.order_ref || 'N/A',
+      customerName: v.order?.verification?.purchaser?.name || v.order?.customer_name || 'Unknown',
+      visitTime: v.visit_time,
+      paymentCollected: v.payment_collected,
+      amountCollected: v.amount_collected || 0,
+      notes: v.visit_notes,
+      latitude: v.latitude,
+      longitude: v.longitude,
+      photos: v.photos.map(p => p.file_url)
+    }));
+
+    return res.json({
+      success: true,
+      data: {
+        filter,
+        dateRange: { start, end },
+        count: transformedVisits.length,
+        visits: transformedVisits
+      }
+    });
+  } catch (error) {
+    console.error('getRecoveryVisits error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 module.exports = {
   getRecoveryDashboardStats,
   getRecoveryFuelCharges,
+  getRecoveryCollectedPayments,
+  getRecoveryVisits,
   getAllRecoveryOfficers,
   getRecoveryOfficerStats,
   getRecoveryCustomers,
