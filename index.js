@@ -10,8 +10,10 @@ const path = require('path');
 const jwt = require('jsonwebtoken');
 
 // ────────────────────────────────────────────────
-// Route Imports
+// Route Importss
 // ────────────────────────────────────────────────
+
+const paytriggerRoutes = require('./src/routes/paytriggerRoutes');
 const hrRoutes = require('./src/routes/hrRoutes');
 const employeePortalRoutes = require('./src/routes/employeePortalRoutes');
 const smartPayWebhookRoutes = require('./src/routes/smartPayWebhookRoutes');
@@ -42,7 +44,7 @@ const searchRoutes = require('./src/routes/searchRoutes');
 const securityLogRoutes = require('./src/routes/securityLogRoutes');
 const complaintRoutes = require('./src/routes/complaintRoutes');
 const tpsRoutes = require('./src/routes/tpsRoutes');
-
+const { checkOverdueDevices } = require('./src/controllers/paytriggerController');
 
 // JWT secret (must be set in .env)
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -446,6 +448,7 @@ app.get('/', (req, res) => {
 // ────────────────────────────────────────────────
 // Routes
 // ────────────────────────────────────────────────
+app.use('/api', paytriggerRoutes);
 app.use('/api/hr', hrRoutes);
 app.use('/api', employeePortalRoutes);
 app.use('/api/smartpay/webhook', smartPayWebhookRoutes);

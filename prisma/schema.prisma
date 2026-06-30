@@ -179,6 +179,7 @@ model Order {
   verification             Verification?         @relation("OrderVerification")
   cash_in_hand             CashInHand[]          @relation("OrderCashInHand")
   installment_ledger       InstallmentLedger?
+  paytrigger_devices       PayTriggerDevice[]
   recovery_visits          RecoveryVisit[]       @relation("OrderRecoveryVisit")
   return_exchanges         ReturnExchange[]      @relation("OrderReturnExchange")
   smart_pay_qrs            SmartPayQr[]
@@ -751,6 +752,7 @@ model Delivery {
   uploads            DeliveryUpload[]
   installment_ledger InstallmentLedger?
   consumerNumbers    ConsumerNumber[]
+  paytrigger_devices PayTriggerDevice[]
 
   @@index([delivery_agent_id])
 }
@@ -1001,22 +1003,55 @@ model VerificationEditHistory {
 }
 
 model InstallmentLedger {
-  id          Int      @id @default(autoincrement())
-  order_id    Int      @unique
-  delivery_id Int      @unique
-  token       String   @unique @db.VarChar(512)
-  ledger_rows Json
-  created_at  DateTime @default(now())
-  updated_at  DateTime @updatedAt
-  short_id    String?  @unique @db.VarChar(20)
-  delivery    Delivery @relation(fields: [delivery_id], references: [id], onDelete: Cascade)
-  order       Order    @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  id                Int      @id @default(autoincrement())
+  order_id          Int      @unique
+  delivery_id       Int      @unique
+  token             String   @unique @db.VarChar(512)
+  ledger_rows       Json
+  created_at        DateTime @default(now())
+  updated_at        DateTime @updatedAt
+  short_id          String?  @unique @db.VarChar(20)
+  paytrigger_status Json?
+  delivery          Delivery @relation(fields: [delivery_id], references: [id], onDelete: Cascade)
+  order             Order    @relation(fields: [order_id], references: [id], onDelete: Cascade)
 
   consumer_numbers ConsumerNumber[]
 
   @@index([token])
   @@index([short_id])
   @@map("installment_ledgers")
+}
+
+model PayTriggerDevice {
+  id                Int       @id @default(autoincrement())
+  imei              String    @unique @db.VarChar(100)
+  device_tag        String?   @db.VarChar(50)
+  order_id          Int
+  order_ref         String?   @db.VarChar(100)
+  delivery_id       Int?
+  product_model     String?   @db.VarChar(200)
+  enrollment_status String    @default("pending") @db.VarChar(30)
+  server_state      Int?
+  lock_status       String    @default("unknown") @db.VarChar(30)
+  mobile_status     Int?
+  expiration        DateTime?
+  active_time       DateTime?
+  last_connect_time DateTime?
+  last_sync_at      DateTime?
+  raw_state         Json?
+  ptp_status        String    @default("none") @db.VarChar(30)
+  promised_date     DateTime?
+  ptp_history       Json?
+  created_at        DateTime  @default(now())
+  updated_at        DateTime  @updatedAt
+
+  order             Order     @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  delivery          Delivery? @relation(fields: [delivery_id], references: [id])
+
+  @@index([order_id])
+  @@index([enrollment_status])
+  @@index([lock_status])
+  @@map("pay_trigger_devices")
 }
 
 model RecoveryVisit {

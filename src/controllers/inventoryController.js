@@ -81,6 +81,7 @@ function generateInstallments(categoryName, price) {
             { months: 6, profit: 0.35, advance: 0.35 },
             { months: 9, profit: 0.45, advance: 0.30 },
             { months: 12, profit: 0.55, advance: 0.25 },
+            { months: 24, profit: 0.85, advance: 0.25 },
         ];
     }
     else if (price > 100000) {
@@ -180,7 +181,7 @@ const getInventory = async (req, res) => {
             }),
             prisma.outletInventory.groupBy({
                 by: ['product_name'],
-                where: { outlet_id, status: 'In Stock' },
+                where: { outlet_id, status: { in: ['In Stock', 'Used Stock'] } },
                 _count: true
             }),
             prisma.outletInventory.groupBy({
