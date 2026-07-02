@@ -5,7 +5,9 @@ const {
   sendOTP,
   sendInstallmentPaymentReceipt,
   sendPartialInstallmentPaymentReceipt,
-  sendNextInstallmentReminder
+  sendNextInstallmentReminder,
+  sendToMany,
+  getCompanyNotifyPhones
 } = require('../services/watiService');
 const { logAction } = require('../utils/auditLogger');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
@@ -632,7 +634,7 @@ const logRecoveryVisit = async (req, res) => {
 const submitInstallment = async (req, res) => {
   const {
     order_id, month_number, amount, payment_method, feedback, fuelCharges,
-    latitude, longitude, visit_notes
+    latitude, longitude, visit_notes, alternate_number
   } = req.body;
   const officerId = req.user?.id;
 
@@ -793,38 +795,42 @@ const submitInstallment = async (req, res) => {
       }
     });
 
-    // Wati Notifications (unchanged)
+    // Wati Notifications — customer + alternate number (officer-entered or on file) + company copy
     const customerName = order.verification?.purchaser?.name || order.customer_name;
     const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+    const altPhone = (alternate_number && String(alternate_number).trim())
+      || order.verification?.purchaser?.alternate_contact
+      || order.alternate_contact;
+    const notifyPhones = [phone, altPhone, ...getCompanyNotifyPhones()];
 
     if (totalPaid >= dueAmount) {
-      sendInstallmentPaymentReceipt(phone, {
+      sendToMany(notifyPhones, (p) => sendInstallmentPaymentReceipt(p, {
         customerName,
         amount: payingNow,
         productName: finalProductName,
         orderRef: order.order_ref,
         date: new Date().toLocaleDateString('en-PK')
-      }).catch(err => console.error('Wati Receipt Error:', err));
+      })).catch(err => console.error('Wati Receipt Error:', err));
     } else {
-      sendPartialInstallmentPaymentReceipt(phone, {
+      sendToMany(notifyPhones, (p) => sendPartialInstallmentPaymentReceipt(p, {
         customerName,
         paidAmount: payingNow,
         remainingAmount: Math.max(0, dueAmount - totalPaid),
         productName: finalProductName,
         orderRef: order.order_ref,
         dueDate: new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate).toLocaleDateString('en-PK')
-      }).catch(err => console.error('Wati Partial Receipt Error:', err));
+      })).catch(err => console.error('Wati Partial Receipt Error:', err));
     }
 
     const nextRow = rows[rowIndex + 1];
     if (nextRow) {
-      sendNextInstallmentReminder(phone, {
+      sendToMany(notifyPhones, (p) => sendNextInstallmentReminder(p, {
         customerName,
         productName: finalProductName,
         monthlyAmount: nextRow.amount || nextRow.dueAmount,
         dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
         ledgerUrl: ledger.token ? `${ledger.token}` : null
-      }).catch(err => console.error('Wati Reminder Error:', err));
+      })).catch(err => console.error('Wati Reminder Error:', err));
     }
 
     // await logAction(...) commented out
@@ -1651,6 +1657,95 @@ const getRecoveryVisits = async (req, res) => {
   }
 };
 
+// ── Promise To Pay (PTP) Day Book — Recovery Officer ────────────────────────
+const getRecoveryPtpList = async (req, res) => {
+  const officerId = req.user.id;
+  const { filter, startDate, endDate } = req.query;
+
+  try {
+    // Get all active orders for this recovery officer
+    const orders = await prisma.order.findMany({
+      where: { recovery_officer_id: officerId, is_delivered: true },
+      select: { id: true, order_ref: true, customer_name: true, whatsapp_number: true, city: true, area: true },
+    });
+
+    if (orders.length === 0) {
+      return res.json({ success: true, data: { filter: filter || null, count: 0, ptpList: [], summary: { active: 0, fulfilled: 0, broken: 0 } } });
+    }
+
+    const orderIds = orders.map(o => o.id);
+    const orderMap = new Map(orders.map(o => [o.id, o]));
+
+    // Date range for filter
+    let dateWhere = {};
+    if (filter) {
+      const nowDt = new Date();
+      let start, end;
+      if (filter === 'today') {
+        start = new Date(nowDt); start.setHours(0, 0, 0, 0);
+        end = new Date(nowDt); end.setHours(23, 59, 59, 999);
+      } else if (filter === 'month') {
+        start = new Date(nowDt.getFullYear(), nowDt.getMonth(), 1, 0, 0, 0, 0);
+        end = new Date(nowDt.getFullYear(), nowDt.getMonth() + 1, 0, 23, 59, 59, 999);
+      } else if (filter === 'custom' && startDate && endDate) {
+        start = new Date(startDate); start.setHours(0, 0, 0, 0);
+        end = new Date(endDate); end.setHours(23, 59, 59, 999);
+      }
+      if (start && end) {
+        dateWhere = { promised_date: { gte: start, lte: end } };
+      }
+    }
+
+    // Fetch PayTrigger devices for these orders that have a PTP record
+    const devices = await prisma.payTriggerDevice.findMany({
+      where: {
+        order_id: { in: orderIds },
+        ptp_status: { not: 'none' },
+        ...dateWhere,
+      },
+      orderBy: { promised_date: 'desc' },
+    });
+
+    const summary = { active: 0, fulfilled: 0, broken: 0 };
+    const ptpList = devices.map(device => {
+      const order = orderMap.get(device.order_id);
+      const status = device.ptp_status || 'active';
+      if (summary[status] !== undefined) summary[status]++;
+
+      return {
+        id: device.id,
+        imei: device.imei,
+        orderId: device.order_id,
+        orderRef: order?.order_ref || device.order_ref || 'N/A',
+        customerName: order?.customer_name || 'Unknown',
+        whatsappNumber: order?.whatsapp_number || null,
+        city: order?.city || null,
+        area: order?.area || null,
+        productModel: device.product_model || null,
+        ptpStatus: status,
+        promisedDate: device.promised_date?.toISOString() || null,
+        previousExpiration: device.expiration?.toISOString() || null,
+        history: Array.isArray(device.ptp_history) ? device.ptp_history : [],
+        createdAt: device.created_at?.toISOString() || null,
+        updatedAt: device.updated_at?.toISOString() || null,
+      };
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        filter: filter || null,
+        count: ptpList.length,
+        summary,
+        ptpList,
+      },
+    });
+  } catch (error) {
+    console.error('getRecoveryPtpList error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+};
+
 module.exports = {
   getRecoveryDashboardStats,
   getRecoveryFuelCharges,
@@ -1666,5 +1761,6 @@ module.exports = {
   submitInstallment,
   logRecoveryVisit,
   getOrderRecoveryVisits,
-  replaceRecoveryVisitPhoto
+  replaceRecoveryVisitPhoto,
+  getRecoveryPtpList,
 };

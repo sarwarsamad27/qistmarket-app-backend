@@ -17,7 +17,8 @@ const {
   getRecoveryDashboardStats,
   getRecoveryFuelCharges,
   getRecoveryCollectedPayments,
-  getRecoveryVisits
+  getRecoveryVisits,
+  getRecoveryPtpList
 } = require('../controllers/recoveryController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
@@ -25,6 +26,7 @@ router.get('/dashboard-stats', authenticateJWT, getRecoveryDashboardStats);
 router.get('/fuel-charges', authenticateJWT, getRecoveryFuelCharges);
 router.get('/collected-payments', authenticateJWT, getRecoveryCollectedPayments);
 router.get('/visits', authenticateJWT, getRecoveryVisits);
+router.get('/ptp', authenticateJWT, getRecoveryPtpList);
 router.get('/officers', authenticateJWT, getAllRecoveryOfficers);
 router.get('/officers/:id/stats', authenticateJWT, getRecoveryOfficerStats);
 
