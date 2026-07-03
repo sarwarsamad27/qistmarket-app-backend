@@ -217,6 +217,48 @@ const sendOrderStatusNotification = async (phone, { customerName, message }) => 
   return sendTemplate(phone, WATI_ORDER_STATUS_TEMPLATE, WATI_ORDER_STATUS_BROADCAST, parameters);
 };
 
+// ─── Template 8: Promise To Pay (PTP) Confirmation ────────────────────────
+// Params: customer_name, product_name, order_ref, promised_date, amount_due
+const WATI_PTP_TEMPLATE = process.env.WATI_PTP_CONFIRMATION_TEMPLATE || 'ptp_confirmation';
+const WATI_PTP_BROADCAST = process.env.WATI_PTP_CONFIRMATION_TEMPLATE || 'ptp_confirmation';
+
+const sendPtpConfirmation = async (phone, {
+  customerName,
+  productName,
+  orderRef,
+  promisedDate,
+  amountDue,
+}) => {
+  const parameters = [
+    { name: '1', value: customerName || 'Customer' },
+    { name: '2', value: productName || 'N/A' },
+    { name: '3', value: orderRef || 'N/A' },
+    { name: '4', value: promisedDate || 'N/A' },
+    { name: '5', value: String(amountDue || 0) },
+  ];
+  return sendTemplate(phone, WATI_PTP_TEMPLATE, WATI_PTP_BROADCAST, parameters);
+};
+
+// ─── Broadcast helper — same template to multiple numbers ─────────────────
+// Dedupes normalized numbers so the same WhatsApp doesn't get double messages.
+const sendToMany = async (phones, sendFn) => {
+  const seen = new Set();
+  const results = [];
+  for (const phone of phones) {
+    const normalized = normalizePhone(phone);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    results.push(await sendFn(normalized));
+  }
+  return results;
+};
+
+// ─── Company notify numbers — from COMPANY_NOTIFY_PHONE (comma-separated) ─
+const getCompanyNotifyPhones = () =>
+  (process.env.COMPANY_NOTIFY_PHONE || '')
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
 
 module.exports = {
   sendTemplate,
@@ -229,4 +271,7 @@ module.exports = {
   sendComplaintReceived,
   sendComplaintResolved,
   sendOrderStatusNotification,
+  sendPtpConfirmation,
+  sendToMany,
+  getCompanyNotifyPhones,
 };

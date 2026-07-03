@@ -5,7 +5,9 @@ const {
   sendOTP,
   sendInstallmentPaymentReceipt,
   sendPartialInstallmentPaymentReceipt,
-  sendNextInstallmentReminder
+  sendNextInstallmentReminder,
+  sendToMany,
+  getCompanyNotifyPhones
 } = require('../services/watiService');
 const { logAction } = require('../utils/auditLogger');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
@@ -346,6 +348,328 @@ const getRecoveryCustomers = async (req, res) => {
 };
 
 
+// ── Branch-wide Payment (any officer, any branch customer) ─────────────────
+// Standalone feature, deliberately separate from getRecoveryCustomers /
+// submitInstallment: lists every delivered order in the OFFICER'S OWN
+// outlet/branch (not just orders assigned to them), so a customer who isn't
+// this officer's assigned customer can still pay through them if they want to.
+const getBranchCustomers = async (req, res) => {
+  const officerId = req.user.id;
+
+  try {
+    const officer = await prisma.user.findUnique({
+      where: { id: officerId },
+      select: { outlet_id: true },
+    });
+
+    if (!officer?.outlet_id) {
+      return res.status(400).json({ success: false, error: 'Officer is not assigned to any branch/outlet' });
+    }
+
+    const orders = await prisma.order.findMany({
+      where: {
+        outlet_id: officer.outlet_id,
+        is_delivered: true,
+      },
+      include: {
+        verification: {
+          include: {
+            purchaser: true,
+            documents: {
+              where: { document_type: 'photo', person_type: 'purchaser' },
+              orderBy: { uploaded_at: 'desc' },
+              take: 1,
+            },
+            grantors: true,
+          },
+        },
+        delivery: {
+          include: {
+            installment_ledger: true,
+          },
+        },
+        cash_in_hand: {
+          orderBy: { created_at: 'desc' },
+          take: 1,
+        },
+      },
+      orderBy: { updated_at: 'desc' },
+    });
+
+    if (orders.length === 0) {
+      return res.status(200).json({ success: true, data: { customers: [] } });
+    }
+
+    const allImeis = orders
+      .map(o => o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial)
+      .filter(Boolean);
+
+    const inventories = await prisma.outletInventory.findMany({
+      where: { imei_serial: { in: allImeis } },
+      select: { imei_serial: true, product_name: true, color_variant: true }
+    });
+
+    const inventoryMap = new Map();
+    for (const inv of inventories) {
+      if (inv.imei_serial) {
+        inventoryMap.set(inv.imei_serial, inv);
+      }
+    }
+
+    const customerMap = new Map();
+
+    for (const order of orders) {
+      const key = `order-${order.id}`;
+
+      const purchaser = order.verification?.purchaser || null;
+      const cashInHand = order.cash_in_hand?.[0] || null;
+      const delivery = order.delivery;
+      const installmentLedgerModel = delivery?.installment_ledger || null;
+      const profilePhoto = order.verification?.documents?.[0]?.file_url || null;
+
+      const customerName = purchaser?.name;
+      const fatherHusbandName = purchaser?.father_husband_name || null;
+      const cnicNumber = purchaser?.cnic_number || null;
+      const presentAddress = purchaser?.present_address || null;
+      const permanentAddress = purchaser?.permanent_address || null;
+      const telephoneNumber = purchaser?.telephone_number || order.whatsapp_number;
+      const nearestLocation = purchaser?.nearest_location || null;
+
+      if (!customerMap.has(key)) {
+        customerMap.set(key, {
+          customer: {
+            name: customerName,
+            father_husband_name: fatherHusbandName,
+            cnic_number: cnicNumber,
+            whatsapp_number: order.whatsapp_number,
+            telephone_number: telephoneNumber,
+            present_address: presentAddress,
+            permanent_address: permanentAddress,
+            nearest_location: nearestLocation,
+            city: order.city,
+            area: order.area,
+            profile_photo: profilePhoto,
+            grantors: order.verification?.grantors || [],
+          },
+          orders: [],
+        });
+      }
+
+      const group = customerMap.get(key);
+
+      const isDelivered = order.is_delivered || delivery?.status === 'completed';
+      const deliveryDate = isDelivered ? (delivery?.end_time || order.updated_at) : null;
+
+      const imeiSerial = cashInHand?.imei_serial || delivery?.product_imei || order.imei_serial || null;
+      const invInfo = imeiSerial ? inventoryMap.get(imeiSerial) : null;
+
+      const productName = invInfo?.product_name || cashInHand?.product_name || order.product_name || null;
+      const colorVariant = invInfo?.color_variant || cashInHand?.color_variant || null;
+
+      let selectedPlan = delivery?.selected_plan || null;
+      if (typeof selectedPlan === 'string') {
+        try { selectedPlan = JSON.parse(selectedPlan); } catch { selectedPlan = null; }
+      }
+
+      const normalized = getNormalizedLedger(installmentLedgerModel?.ledger_rows);
+      const { advance_payment: advancePayment, installment_ledger: installmentLedger, summary } = normalized;
+
+      const advanceAmount = advancePayment.amount;
+      const monthlyAmount = installmentLedger[0]?.dueAmount || Number(selectedPlan?.monthly_amount || selectedPlan?.monthlyAmount || 0);
+      const totalMonths = installmentLedger.length || Number(selectedPlan?.months || selectedPlan?.totalMonths || 0);
+
+      group.orders.push({
+        id: order.id,
+        order_ref: order.order_ref,
+        status: order.status,
+        is_delivered: isDelivered,
+        delivery_date: deliveryDate,
+        is_assigned_to_me: order.recovery_officer_id === officerId,
+
+        product_details: {
+          product_name: productName,
+          imei_serial: imeiSerial,
+          color_variant: colorVariant,
+        },
+
+        plan: {
+          selected_plan: selectedPlan,
+          advance_amount: advanceAmount,
+          monthly_amount: monthlyAmount,
+          months: totalMonths,
+          total_plan_value: summary.grandTotalDue,
+        },
+
+        ledger: {
+          advance_payment: advancePayment,
+          installment_ledger: installmentLedger,
+          ledger_token: installmentLedgerModel?.short_id || null,
+          summary: summary,
+        },
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: { customers: Array.from(customerMap.values()) },
+    });
+  } catch (error) {
+    console.error('getBranchCustomers error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+};
+
+// Lightweight payment collection for the branch-wide flow — no photos, no
+// location. Enforces that the officer and the order belong to the same
+// outlet/branch (the one restriction this flow explicitly requires).
+const submitBranchPayment = async (req, res) => {
+  const { order_id, month_number, amount, payment_method, feedback, alternate_number } = req.body;
+  const officerId = req.user?.id;
+
+  try {
+    const officer = await prisma.user.findUnique({
+      where: { id: officerId },
+      select: { outlet_id: true },
+    });
+
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(order_id) },
+      include: {
+        verification: { include: { purchaser: true } },
+        installment_ledger: true,
+        delivery: true,
+        cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 }
+      }
+    });
+
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+    if (!officer?.outlet_id || order.outlet_id !== officer.outlet_id) {
+      return res.status(403).json({ success: false, message: 'This customer belongs to a different branch' });
+    }
+
+    const ledger = order.installment_ledger;
+    if (!ledger) return res.status(404).json({ success: false, message: 'Ledger not found' });
+
+    let rows = normalizeLedger(Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : []);
+    const rowIndex = rows.findIndex(r => (r.month == month_number || r.monthNumber == month_number));
+
+    if (rowIndex === -1) return res.status(404).json({ success: false, message: 'Installment month not found in ledger' });
+    if (rows[rowIndex].status === 'paid') return res.status(400).json({ success: false, message: 'Installment already paid' });
+
+    const dueAmount = parseFloat(rows[rowIndex].amount || rows[rowIndex].dueAmount || 0);
+    const existingPaid = parseFloat(rows[rowIndex].paid_amount || 0);
+    const payingNow = amount !== undefined ? parseFloat(amount) : (dueAmount - existingPaid);
+    const totalPaid = existingPaid + payingNow;
+
+    if (totalPaid > dueAmount + 1) {
+      return res.status(400).json({ success: false, message: `Payment exceeds due amount. Remaining is ${dueAmount - existingPaid}` });
+    }
+
+    const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial;
+    const finalProductName = order.cash_in_hand?.[0]?.product_name || order.product_name;
+
+    await prisma.$transaction(async (tx) => {
+      rows[rowIndex].paid_amount = totalPaid;
+      rows[rowIndex].paid_at = now();
+      rows[rowIndex].payment_method = payment_method;
+      rows[rowIndex].feedback = feedback || 'Branch payment';
+      rows[rowIndex].collected_by = officerId;
+
+      if (totalPaid >= dueAmount) {
+        rows[rowIndex].status = 'paid';
+      } else if (totalPaid > 0) {
+        rows[rowIndex].status = 'partial';
+      } else {
+        rows[rowIndex].status = 'pending';
+      }
+
+      await tx.installmentLedger.update({
+        where: { id: ledger.id },
+        data: {
+          ledger_rows: rows,
+          updated_at: now()
+        }
+      });
+
+      const isCash = ['cash', 'recovery_cash', 'recovery cash'].includes(payment_method?.toLowerCase());
+      if (isCash) {
+        await tx.cashInHand.create({
+          data: {
+            officer_id: officerId,
+            order_id: order.id,
+            amount: payingNow,
+            status: 'pending',
+            customer_name: order.verification?.purchaser?.name || order.customer_name,
+            product_name: finalProductName,
+            imei_serial: imeiSerial || order.imei_serial,
+            payment_method: payment_method,
+            cash_type: 'Branch payment',
+            submitted_amount: 0,
+            created_at: now(),
+            updated_at: now()
+          }
+        });
+
+        await createOfficerTransaction({
+          officer_id: officerId,
+          type: 'credit',
+          amount: payingNow,
+          status: 'pending',
+          description: `Branch payment collected from ${order.verification?.purchaser?.name || order.customer_name}`,
+          payment_method: payment_method,
+          order_ref: order.order_ref
+        }, tx);
+      }
+
+      // No photos/location for this flow — log a lightweight visit record.
+      await tx.recoveryVisit.create({
+        data: {
+          order_id: parseInt(order_id),
+          officer_id: officerId,
+          visit_time: now(),
+          customer_feedback: feedback || 'Branch payment (no assigned visit)',
+          payment_collected: true,
+          amount_collected: payingNow,
+          created_at: now()
+        }
+      });
+    });
+
+    // Wati Notifications — same pattern as submitInstallment
+    const customerName = order.verification?.purchaser?.name || order.customer_name;
+    const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+    const altPhone = (alternate_number && String(alternate_number).trim())
+      || order.verification?.purchaser?.alternate_contact
+      || order.alternate_contact;
+    const notifyPhones = [phone, altPhone, ...getCompanyNotifyPhones()];
+
+    if (totalPaid >= dueAmount) {
+      sendToMany(notifyPhones, (p) => sendInstallmentPaymentReceipt(p, {
+        customerName,
+        amount: payingNow,
+        productName: finalProductName,
+        orderRef: order.order_ref,
+        date: new Date().toLocaleDateString('en-PK')
+      })).catch(err => console.error('Wati Receipt Error:', err));
+    } else {
+      sendToMany(notifyPhones, (p) => sendPartialInstallmentPaymentReceipt(p, {
+        customerName,
+        paidAmount: payingNow,
+        remainingAmount: Math.max(0, dueAmount - totalPaid),
+        productName: finalProductName,
+        orderRef: order.order_ref,
+        dueDate: new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate).toLocaleDateString('en-PK')
+      })).catch(err => console.error('Wati Partial Receipt Error:', err));
+    }
+
+    return res.json({ success: true, message: 'Payment processed successfully' });
+  } catch (error) {
+    console.error('submitBranchPayment error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 // ── Cash In Hand (Recovery Officer day book) ────────────────────────────────
 // `cashInHand` is always the officer's current unsubmitted running balance
 // (never date-bound). When `filter`/`startDate`/`endDate` query params are
@@ -632,7 +956,7 @@ const logRecoveryVisit = async (req, res) => {
 const submitInstallment = async (req, res) => {
   const {
     order_id, month_number, amount, payment_method, feedback, fuelCharges,
-    latitude, longitude, visit_notes
+    latitude, longitude, visit_notes, alternate_number
   } = req.body;
   const officerId = req.user?.id;
 
@@ -793,38 +1117,42 @@ const submitInstallment = async (req, res) => {
       }
     });
 
-    // Wati Notifications (unchanged)
+    // Wati Notifications — customer + alternate number (officer-entered or on file) + company copy
     const customerName = order.verification?.purchaser?.name || order.customer_name;
     const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+    const altPhone = (alternate_number && String(alternate_number).trim())
+      || order.verification?.purchaser?.alternate_contact
+      || order.alternate_contact;
+    const notifyPhones = [phone, altPhone, ...getCompanyNotifyPhones()];
 
     if (totalPaid >= dueAmount) {
-      sendInstallmentPaymentReceipt(phone, {
+      sendToMany(notifyPhones, (p) => sendInstallmentPaymentReceipt(p, {
         customerName,
         amount: payingNow,
         productName: finalProductName,
         orderRef: order.order_ref,
         date: new Date().toLocaleDateString('en-PK')
-      }).catch(err => console.error('Wati Receipt Error:', err));
+      })).catch(err => console.error('Wati Receipt Error:', err));
     } else {
-      sendPartialInstallmentPaymentReceipt(phone, {
+      sendToMany(notifyPhones, (p) => sendPartialInstallmentPaymentReceipt(p, {
         customerName,
         paidAmount: payingNow,
         remainingAmount: Math.max(0, dueAmount - totalPaid),
         productName: finalProductName,
         orderRef: order.order_ref,
         dueDate: new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate).toLocaleDateString('en-PK')
-      }).catch(err => console.error('Wati Partial Receipt Error:', err));
+      })).catch(err => console.error('Wati Partial Receipt Error:', err));
     }
 
     const nextRow = rows[rowIndex + 1];
     if (nextRow) {
-      sendNextInstallmentReminder(phone, {
+      sendToMany(notifyPhones, (p) => sendNextInstallmentReminder(p, {
         customerName,
         productName: finalProductName,
         monthlyAmount: nextRow.amount || nextRow.dueAmount,
         dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
         ledgerUrl: ledger.token ? `${ledger.token}` : null
-      }).catch(err => console.error('Wati Reminder Error:', err));
+      })).catch(err => console.error('Wati Reminder Error:', err));
     }
 
     // await logAction(...) commented out
@@ -868,6 +1196,133 @@ const getOrderRecoveryVisits = async (req, res) => {
       success: false,
       error: { code: 500, message: 'Internal server error' }
     });
+  }
+};
+
+// ── Full Profile — everything about one customer's order in one place ──────
+// Contact + guarantor basics (already used elsewhere) + full ledger +
+// verification location + a merged, dated timeline of visits/feedback/PTPs.
+// NOTE: delivery has no lat/long anywhere in the schema — this endpoint
+// cannot return a delivery location because it was never captured.
+const getCustomerFullProfile = async (req, res) => {
+  const { order_id } = req.params;
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(order_id) },
+      include: {
+        verification: {
+          include: {
+            purchaser: true,
+            grantors: true,
+            locations: true, // LocationTracking (live GPS pings during verification)
+            verification_locations: true, // richer, labeled location captures
+          },
+        },
+        delivery: { include: { installment_ledger: true } },
+        paytrigger_devices: true,
+      },
+    });
+
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    const purchaser = order.verification?.purchaser || null;
+    const normalized = getNormalizedLedger(order.delivery?.installment_ledger?.ledger_rows);
+
+    // ── Timeline: visits (feedback + location + photos) + PTP history ──────
+    const visits = await prisma.recoveryVisit.findMany({
+      where: { order_id: order.id },
+      include: { photos: { orderBy: { uploaded_at: 'desc' } } },
+      orderBy: { visit_time: 'desc' },
+    });
+
+    const timeline = visits.map(v => ({
+      type: 'visit',
+      date: v.visit_time,
+      feedback: v.customer_feedback,
+      notes: v.visit_notes,
+      latitude: v.latitude,
+      longitude: v.longitude,
+      payment_collected: v.payment_collected,
+      amount_collected: v.amount_collected,
+      fuel_charges: v.fuel_charges,
+      photos: v.photos.map(p => p.file_url),
+    }));
+
+    const device = order.paytrigger_devices?.[0] || null;
+    if (device?.ptp_history && Array.isArray(device.ptp_history)) {
+      for (const entry of device.ptp_history) {
+        timeline.push({
+          type: 'ptp',
+          date: entry.date,
+          promised_date: entry.promised_date,
+          status: entry.status,
+          // ptp_history itself never captured location — if this promise was
+          // set through the app's Visit flow, the matching visit above (same
+          // timestamp) carries the actual location.
+          latitude: null,
+          longitude: null,
+        });
+      }
+    }
+
+    timeline.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    return res.json({
+      success: true,
+      data: {
+        customer: {
+          name: purchaser?.name || order.customer_name,
+          father_husband_name: purchaser?.father_husband_name || null,
+          cnic_number: purchaser?.cnic_number || null,
+          whatsapp_number: order.whatsapp_number,
+          telephone_number: purchaser?.telephone_number || order.whatsapp_number,
+          present_address: purchaser?.present_address || null,
+          permanent_address: purchaser?.permanent_address || null,
+          city: order.city,
+          area: order.area,
+        },
+        guarantors: (order.verification?.grantors || []).map(g => ({
+          name: g.name,
+          relation: g.relation,
+          telephone_number: g.telephone_number,
+          address: g.address,
+          nearest_location: g.nearest_location,
+        })),
+        ledger: normalized,
+        verification_location: [
+          ...(order.verification?.locations || []).map(l => ({
+            source: 'live_tracking',
+            label: l.label,
+            latitude: l.latitude,
+            longitude: l.longitude,
+            timestamp: l.timestamp,
+          })),
+          ...(order.verification?.verification_locations || []).map(l => ({
+            source: 'verification_capture',
+            label: l.label,
+            type: l.location_type,
+            latitude: l.latitude,
+            longitude: l.longitude,
+            address: l.address,
+            timestamp: l.created_at,
+          })),
+        ],
+        delivery_location: null, // not captured anywhere in the system today
+        device: device ? {
+          imei: device.imei,
+          ptp_status: device.ptp_status,
+          promised_date: device.promised_date,
+          lock_status: device.lock_status,
+        } : null,
+        timeline,
+      },
+    });
+  } catch (error) {
+    console.error('getCustomerFullProfile error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 };
 
@@ -1651,6 +2106,95 @@ const getRecoveryVisits = async (req, res) => {
   }
 };
 
+// ── Promise To Pay (PTP) Day Book — Recovery Officer ────────────────────────
+const getRecoveryPtpList = async (req, res) => {
+  const officerId = req.user.id;
+  const { filter, startDate, endDate } = req.query;
+
+  try {
+    // Get all active orders for this recovery officer
+    const orders = await prisma.order.findMany({
+      where: { recovery_officer_id: officerId, is_delivered: true },
+      select: { id: true, order_ref: true, customer_name: true, whatsapp_number: true, city: true, area: true },
+    });
+
+    if (orders.length === 0) {
+      return res.json({ success: true, data: { filter: filter || null, count: 0, ptpList: [], summary: { active: 0, fulfilled: 0, broken: 0 } } });
+    }
+
+    const orderIds = orders.map(o => o.id);
+    const orderMap = new Map(orders.map(o => [o.id, o]));
+
+    // Date range for filter
+    let dateWhere = {};
+    if (filter) {
+      const nowDt = new Date();
+      let start, end;
+      if (filter === 'today') {
+        start = new Date(nowDt); start.setHours(0, 0, 0, 0);
+        end = new Date(nowDt); end.setHours(23, 59, 59, 999);
+      } else if (filter === 'month') {
+        start = new Date(nowDt.getFullYear(), nowDt.getMonth(), 1, 0, 0, 0, 0);
+        end = new Date(nowDt.getFullYear(), nowDt.getMonth() + 1, 0, 23, 59, 59, 999);
+      } else if (filter === 'custom' && startDate && endDate) {
+        start = new Date(startDate); start.setHours(0, 0, 0, 0);
+        end = new Date(endDate); end.setHours(23, 59, 59, 999);
+      }
+      if (start && end) {
+        dateWhere = { promised_date: { gte: start, lte: end } };
+      }
+    }
+
+    // Fetch PayTrigger devices for these orders that have a PTP record
+    const devices = await prisma.payTriggerDevice.findMany({
+      where: {
+        order_id: { in: orderIds },
+        ptp_status: { not: 'none' },
+        ...dateWhere,
+      },
+      orderBy: { promised_date: 'desc' },
+    });
+
+    const summary = { active: 0, fulfilled: 0, broken: 0 };
+    const ptpList = devices.map(device => {
+      const order = orderMap.get(device.order_id);
+      const status = device.ptp_status || 'active';
+      if (summary[status] !== undefined) summary[status]++;
+
+      return {
+        id: device.id,
+        imei: device.imei,
+        orderId: device.order_id,
+        orderRef: order?.order_ref || device.order_ref || 'N/A',
+        customerName: order?.customer_name || 'Unknown',
+        whatsappNumber: order?.whatsapp_number || null,
+        city: order?.city || null,
+        area: order?.area || null,
+        productModel: device.product_model || null,
+        ptpStatus: status,
+        promisedDate: device.promised_date?.toISOString() || null,
+        previousExpiration: device.expiration?.toISOString() || null,
+        history: Array.isArray(device.ptp_history) ? device.ptp_history : [],
+        createdAt: device.created_at?.toISOString() || null,
+        updatedAt: device.updated_at?.toISOString() || null,
+      };
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        filter: filter || null,
+        count: ptpList.length,
+        summary,
+        ptpList,
+      },
+    });
+  } catch (error) {
+    console.error('getRecoveryPtpList error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+};
+
 module.exports = {
   getRecoveryDashboardStats,
   getRecoveryFuelCharges,
@@ -1659,6 +2203,8 @@ module.exports = {
   getAllRecoveryOfficers,
   getRecoveryOfficerStats,
   getRecoveryCustomers,
+  getBranchCustomers,
+  submitBranchPayment,
   getCollectionStats,
   getDueOverdueInstallments,
   submitCollections,
@@ -1666,5 +2212,7 @@ module.exports = {
   submitInstallment,
   logRecoveryVisit,
   getOrderRecoveryVisits,
-  replaceRecoveryVisitPhoto
+  getCustomerFullProfile,
+  replaceRecoveryVisitPhoto,
+  getRecoveryPtpList,
 };

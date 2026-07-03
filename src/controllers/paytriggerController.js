@@ -2,6 +2,7 @@ const prisma = require('../../lib/prisma');
 const pt = require('../services/paytriggerService');
 const { logAction } = require('../utils/auditLogger');
 const { getNormalizedLedger } = require('../utils/ledgerUtils');
+const { sendPtpConfirmation, sendToMany, getCompanyNotifyPhones } = require('../services/watiService');
 
 const now = () => new Date();
 
@@ -195,7 +196,7 @@ async function manualUnlock(req, res) {
 async function promiseToPay(req, res) {
   try {
     const { imei } = req.params;
-    const { promised_date } = req.body;
+    const { promised_date, alternate_number } = req.body;
     if (!promised_date) return res.status(400).json({ success: false, message: 'promised_date required' });
 
     const device = await prisma.payTriggerDevice.findUnique({ where: { imei } });
@@ -249,6 +250,35 @@ async function promiseToPay(req, res) {
     });
 
     await logAction(req, 'PAYTRIGGER_PTP', `PTP activated for device ${imei}, promised date: ${promised_date}`, device.order_id, 'Order');
+
+    // ── Wati Notification — customer + alternate number + company copy ─────
+    if (device.order_id) {
+      const order = await prisma.order.findUnique({
+        where: { id: device.order_id },
+        include: { verification: { include: { purchaser: true } }, installment_ledger: true },
+      });
+
+      if (order) {
+        const customerName = order.verification?.purchaser?.name || order.customer_name;
+        const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+        const altPhone = (alternate_number && String(alternate_number).trim())
+          || order.verification?.purchaser?.alternate_contact
+          || order.alternate_contact;
+
+        const normalized = getNormalizedLedger(order.installment_ledger?.ledger_rows);
+        const pendingRow = normalized.installment_ledger.find(r => (r.status || '').toLowerCase() !== 'paid');
+        const amountDue = pendingRow?.remainingAmount ?? pendingRow?.dueAmount ?? 0;
+
+        const notifyPhones = [phone, altPhone, ...getCompanyNotifyPhones()];
+        sendToMany(notifyPhones, (p) => sendPtpConfirmation(p, {
+          customerName,
+          productName: device.product_model || order.product_name,
+          orderRef: device.order_ref || order.order_ref,
+          promisedDate: promisedAt.toLocaleDateString('en-PK'),
+          amountDue,
+        })).catch(err => console.error('Wati PTP Confirmation Error:', err));
+      }
+    }
 
     return res.json({ success: true, message: 'PTP activated, device temporarily unlocked' });
   } catch (error) {
