@@ -13,6 +13,7 @@ const { logAction } = require('../utils/auditLogger');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
 const { createOfficerTransaction } = require('../utils/officerTransactionUtils');
 const { updateRecoveryRanking } = require('../services/recoveryRankingService');
+const { notifyAdmins, notifyOutlet, notifyUser } = require('../utils/notificationUtils');
 
 const now = () => new Date();
 
@@ -663,6 +664,17 @@ const submitBranchPayment = async (req, res) => {
       })).catch(err => console.error('Wati Partial Receipt Error:', err));
     }
 
+    // ── Transaction notification — Admin/Super Admin + the officer's outlet ──
+    const io = req.app.get('io');
+    const notifyTitle = 'Recovery Payment Collected (Branch)';
+    const notifyMsg = `${req.user?.full_name || 'Recovery Officer'} collected PKR ${payingNow} from ${customerName} (Order #${order.order_ref})`;
+    notifyAdmins(notifyTitle, notifyMsg, 'payment_collected', order.id, io)
+      .catch(err => console.error('notifyAdmins error:', err));
+    if (order.outlet_id) {
+      notifyOutlet(order.outlet_id, notifyTitle, notifyMsg, 'payment_collected', order.id, io)
+        .catch(err => console.error('notifyOutlet error:', err));
+    }
+
     return res.json({ success: true, message: 'Payment processed successfully' });
   } catch (error) {
     console.error('submitBranchPayment error:', error);
@@ -1156,6 +1168,17 @@ const submitInstallment = async (req, res) => {
     }
 
     // await logAction(...) commented out
+
+    // ── Transaction notification — Admin/Super Admin + the officer's outlet ──
+    const io = req.app.get('io');
+    const notifyTitle = 'Recovery Payment Collected';
+    const notifyMsg = `${req.user?.full_name || 'Recovery Officer'} collected PKR ${payingNow} from ${customerName} (Order #${order.order_ref})`;
+    notifyAdmins(notifyTitle, notifyMsg, 'payment_collected', order.id, io)
+      .catch(err => console.error('notifyAdmins error:', err));
+    if (order.outlet_id) {
+      notifyOutlet(order.outlet_id, notifyTitle, notifyMsg, 'payment_collected', order.id, io)
+        .catch(err => console.error('notifyOutlet error:', err));
+    }
 
     return res.json({ success: true, message: 'Payment processed successfully' });
   } catch (error) {

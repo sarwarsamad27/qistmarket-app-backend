@@ -182,7 +182,7 @@ const submitDelivery = async (req, res) => {
         // Mark inventory as Sold since it has been successfully delivered
         await prisma.outletInventory.update({
           where: { id: inventory.id },
-          data: { 
+          data: {
             status: 'Sold',
             updated_at: now()   // ✅ explicit updated_at
           }
@@ -206,7 +206,7 @@ const submitDelivery = async (req, res) => {
           stockTransferId = transfer.id;
           await prisma.stockTransfer.update({
             where: { id: transfer.id },
-            data: { 
+            data: {
               status: 'delivered',
               updated_at: now()   // ✅ explicit updated_at
             }
@@ -921,7 +921,7 @@ const getCashInHand = async (req, res) => {
 
     // Re-sort ascending to calculate chronological running balance
     groupedHistory.sort((a, b) => new Date(a.transaction_date).getTime() - new Date(b.transaction_date).getTime());
-    
+
     let runBal = 0;
     groupedHistory.forEach(item => {
       if (item.type === 'credit') {
@@ -969,14 +969,14 @@ const submitCashToOutlet = async (req, res) => {
   try {
     // 0. Check for pending submissions
     const pendingSubmission = await prisma.cashSubmissionHistory.findFirst({
-        where: {
-            cash_in_hand: { officer_id: deliveryBoyId },
-            status: 'pending'
-        }
+      where: {
+        cash_in_hand: { officer_id: deliveryBoyId },
+        status: 'pending'
+      }
     });
 
     if (pendingSubmission) {
-        return res.status(400).json({ success: false, message: 'You already have a pending cash submission. Please complete it first.' });
+      return res.status(400).json({ success: false, message: 'You already have a pending cash submission. Please complete it first.' });
     }
 
     // 1. Fetch all cash entries to calculate bank-like balance
@@ -993,21 +993,14 @@ const submitCashToOutlet = async (req, res) => {
     const totalDebits = availableEntries.reduce((sum, e) => sum + (e.submitted_amount || 0), 0);
     const currentBalance = totalCredits - totalDebits;
 
-    if (currentBalance <= 0) {
-      return res.status(400).json({ success: false, message: 'Your current cash balance is zero. No cash to submit.' });
-    }
-
+    // ✅ No restriction — submission allowed regardless of balance (zero,
+    // negative, or any amount above the calculated balance).
     let amountToSubmit = parseFloat(submit_amount);
-    if (isNaN(amountToSubmit) || amountToSubmit <= 0) {
-      amountToSubmit = currentBalance; // Default to full submission
+    if (isNaN(amountToSubmit)) {
+      amountToSubmit = currentBalance; // Default to full submission only when unparseable
     }
 
-    if (amountToSubmit > currentBalance) {
-      return res.status(400).json({
-        success: false,
-        message: `Cannot submit more than your current balance (PKR ${currentBalance})`
-      });
-    }
+    const lastEntry = availableEntries[availableEntries.length - 1];
 
     // Filter out only entries that have remaining balance for FIFO distribution
     availableEntries = availableEntries.filter(e => (e.amount - (e.submitted_amount || 0)) > 0);
@@ -1038,10 +1031,36 @@ const submitCashToOutlet = async (req, res) => {
       remainingToSubmit -= drawAmount;
     }
 
+    // If there is excess submit amount (e.g. balance is 0/negative or excess submission), link it to the last entry
+    if (remainingToSubmit > 0) {
+      const targetEntry = lastEntry;
+      if (targetEntry) {
+        const existingIndex = historyCreations.findIndex(hc => hc.cash_in_hand_id === targetEntry.id);
+        if (existingIndex !== -1) {
+          historyCreations[existingIndex].amount_submitted += remainingToSubmit;
+        } else {
+          historyCreations.push({
+            cash_in_hand_id: targetEntry.id,
+            amount_submitted: remainingToSubmit,
+            status: 'pending',
+            otp: otp,
+            submission_ref: submissionRef,
+            outlet_id: payment_method === 'Online' ? null : parseInt(outlet_id),
+            submission_date: now()
+          });
+        }
+        remainingToSubmit = 0;
+      } else {
+        return res.status(400).json({ success: false, message: 'No cash collections found to link this submission to. Please collect some payment or deliver an order first.' });
+      }
+    }
+
     // 3. Create the CashSubmissionHistory records
-    await prisma.cashSubmissionHistory.createMany({
-      data: historyCreations
-    });
+    if (historyCreations.length > 0) {
+      await prisma.cashSubmissionHistory.createMany({
+        data: historyCreations
+      });
+    }
 
     // 3.1 Create OfficerTransaction records for debits sequentially.
     // STATUS IS ALWAYS 'pending' — only moves to 'paid' when OTP is verified by outlet.
@@ -1058,18 +1077,18 @@ const submitCashToOutlet = async (req, res) => {
       });
     }
 
-    const officer = availableEntries[0]?.officer;
+    const officer = lastEntry?.officer;
     const officerName = officer?.full_name || 'Officer';
     const officerPhone = officer?.phone;
 
     if (payment_method === 'Online') {
       const userRecord = await prisma.user.findUnique({
-          where: { id: deliveryBoyId },
-          select: { bill_consumer_number: true, smart_pay_consumer_number: true }
+        where: { id: deliveryBoyId },
+        select: { bill_consumer_number: true, smart_pay_consumer_number: true }
       });
 
       if (!userRecord?.bill_consumer_number) {
-          return res.status(400).json({ success: false, message: 'Your account does not have an active 1Bill or SmartPay number. Please contact support.' });
+        return res.status(400).json({ success: false, message: 'Your account does not have an active 1Bill or SmartPay number. Please contact support.' });
       }
 
       const dueDate = new Date();
@@ -1077,72 +1096,72 @@ const submitCashToOutlet = async (req, res) => {
 
       let qrImageBase64 = null;
       try {
-          const yy = String(dueDate.getFullYear()).slice(-2);
-          const mm = String(dueDate.getMonth() + 1).padStart(2, '0');
-          const billingMonth = `${yy}${mm}`;
-          const refInfo = `QIST-${deliveryBoyId}-${Date.now()}`.substring(0, 30);
-          const username = process.env.SMARTPAY_USERNAME || 'test';
-          const password = process.env.SMARTPAY_PASSWORD || 'test';
+        const yy = String(dueDate.getFullYear()).slice(-2);
+        const mm = String(dueDate.getMonth() + 1).padStart(2, '0');
+        const billingMonth = `${yy}${mm}`;
+        const refInfo = `QIST-${deliveryBoyId}-${Date.now()}`.substring(0, 30);
+        const username = process.env.SMARTPAY_USERNAME || 'test';
+        const password = process.env.SMARTPAY_PASSWORD || 'test';
 
-          const tokenReq = await fetch(process.env.SMARTPAY_TOKEN_URL || 'https://smartpay.com.pk/services/api/v1/token', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ username, password })
+        const tokenReq = await fetch(process.env.SMARTPAY_TOKEN_URL || 'https://smartpay.com.pk/services/api/v1/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password })
+        });
+        const tokenResponse = await tokenReq.json();
+        if (tokenResponse?.statusCode === "200" && tokenResponse?.dist?.jwtToken) {
+          const dqrReq = await fetch(process.env.SMARTPAY_DQR_URL || 'https://smartpay.com.pk/services/api/v1/DQR', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `${tokenResponse.dist.jwtToken}`
+            },
+            body: JSON.stringify({
+              Consumer_Number: userRecord.smart_pay_consumer_number,
+              Consumer_Detail: officerName,
+              Billing_Month: billingMonth,
+              Amount: parseFloat(amountToSubmit).toFixed(2),
+              CellNo: officerPhone || "",
+              EMail: "",
+              ReferenceInfo: refInfo,
+              reserved: ""
+            })
           });
-          const tokenResponse = await tokenReq.json();
-          if (tokenResponse?.statusCode === "200" && tokenResponse?.dist?.jwtToken) {
-              const dqrReq = await fetch(process.env.SMARTPAY_DQR_URL || 'https://smartpay.com.pk/services/api/v1/DQR', {
-                  method: 'POST',
-                  headers: {
-                      'Content-Type': 'application/json',
-                      'Authorization': `${tokenResponse.dist.jwtToken}`
-                  },
-                  body: JSON.stringify({
-                      Consumer_Number: userRecord.smart_pay_consumer_number,
-                      Consumer_Detail: officerName,
-                      Billing_Month: billingMonth,
-                      Amount: parseFloat(amountToSubmit).toFixed(2),
-                      CellNo: officerPhone || "",
-                      EMail: "",
-                      ReferenceInfo: refInfo,
-                      reserved: ""
-                  })
-              });
-              const dqrResponse = await dqrReq.json();
-              if (dqrResponse?.statusCode === "200" && dqrResponse?.QrString) {
-                  qrImageBase64 = await qrcode.toDataURL(dqrResponse.QrString, {
-                      errorCorrectionLevel: 'H',
-                      margin: 2,
-                      width: 400
-                  });
-              }
+          const dqrResponse = await dqrReq.json();
+          if (dqrResponse?.statusCode === "200" && dqrResponse?.QrString) {
+            qrImageBase64 = await qrcode.toDataURL(dqrResponse.QrString, {
+              errorCorrectionLevel: 'H',
+              margin: 2,
+              width: 400
+            });
           }
+        }
       } catch (err) {
-          console.error("Failed to generate SmartPay QR in submitCash:", err);
+        console.error("Failed to generate SmartPay QR in submitCash:", err);
       }
 
       await prisma.consumerNumber.updateMany({
-          where: { 
-              consumer_number: { in: [userRecord.bill_consumer_number, userRecord.smart_pay_consumer_number] },
-              user_id: deliveryBoyId 
-          },
-          data: {
-              amount_due: amountToSubmit,
-              bill_status: 'U',
-              cash_submission_ref: submissionRef,
-              due_date: dueDate
-          }
+        where: {
+          consumer_number: { in: [userRecord.bill_consumer_number, userRecord.smart_pay_consumer_number] },
+          user_id: deliveryBoyId
+        },
+        data: {
+          amount_due: amountToSubmit,
+          bill_status: 'U',
+          cash_submission_ref: submissionRef,
+          due_date: dueDate
+        }
       });
 
       return res.status(200).json({
-          success: true,
-          message: 'Online cash submission initiated.',
-          total_amount: amountToSubmit,
-          bill_consumer_number: userRecord.bill_consumer_number,
-          smart_pay_consumer_number: userRecord.smart_pay_consumer_number,
-          smart_pay_qr_base64: qrImageBase64,
-          submission_ref: submissionRef,
-          expires_at: dueDate
+        success: true,
+        message: 'Online cash submission initiated.',
+        total_amount: amountToSubmit,
+        bill_consumer_number: userRecord.bill_consumer_number,
+        smart_pay_consumer_number: userRecord.smart_pay_consumer_number,
+        smart_pay_qr_base64: qrImageBase64,
+        submission_ref: submissionRef,
+        expires_at: dueDate
       });
     }
 
@@ -1483,7 +1502,7 @@ const verifyRefundOtp = async (req, res) => {
 
     await prisma.order.update({
       where: { id: parseInt(order_id) },
-      data: { 
+      data: {
         status: 'refunded',
         updated_at: now()   // ✅ explicit updated_at
       }
@@ -1911,7 +1930,7 @@ const submitSelfPickupDelivery = async (req, res) => {
         if (inventory) {
           await tx.outletInventory.update({
             where: { id: inventory.id },
-            data: { 
+            data: {
               status: 'Sold',
               updated_at: now()
             }
@@ -2433,8 +2452,8 @@ const getDeliveryDashboardStats = async (req, res) => {
         const entryDate = new Date(entry.updatedAt);
         if (entryDate >= start && entryDate <= end) {
           const prevKm = Number(entry.previous?.bike_km_range || 0);
-          const updKm  = Number(entry.updated?.bike_km_range  || 0);
-          const delta  = updKm - prevKm;
+          const updKm = Number(entry.updated?.bike_km_range || 0);
+          const delta = updKm - prevKm;
           if (delta > 0) bikeRange += delta;
         }
       });
