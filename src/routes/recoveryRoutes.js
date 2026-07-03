@@ -6,6 +6,8 @@ const {
   getAllRecoveryOfficers,
   getRecoveryOfficerStats,
   getRecoveryCustomers,
+  getBranchCustomers,
+  submitBranchPayment,
   getCollectionStats,
   getDueOverdueInstallments,
   submitCollections,
@@ -13,6 +15,7 @@ const {
   submitInstallment,
   logRecoveryVisit,
   getOrderRecoveryVisits,
+  getCustomerFullProfile,
   replaceRecoveryVisitPhoto,
   getRecoveryDashboardStats,
   getRecoveryFuelCharges,
@@ -32,6 +35,10 @@ router.get('/officers/:id/stats', authenticateJWT, getRecoveryOfficerStats);
 
 // Collection Routes
 router.get('/customers', authenticateJWT, getRecoveryCustomers);
+
+// Branch-wide Payment — any officer can pay any customer within their own outlet/branch
+router.get('/branch-customers', authenticateJWT, getBranchCustomers);
+router.post('/branch-payment', authenticateJWT, submitBranchPayment);
 router.get('/collection-stats', authenticateJWT, getCollectionStats);
 router.get('/overdue', authenticateJWT, getDueOverdueInstallments);
 router.post('/submit-collections', authenticateJWT, submitCollections);
@@ -63,6 +70,7 @@ router.post(
 
 // recoveryRoutes.js - Add this route
 router.get('/order/:order_id/visits', authenticateJWT, getOrderRecoveryVisits);
+router.get('/order/:order_id/full-profile', authenticateJWT, getCustomerFullProfile);
 
 // Replace recovery visit photo (Super Admin only)
 router.put(
