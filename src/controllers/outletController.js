@@ -8,6 +8,7 @@ const { sendOTP, sendInstallmentPaymentReceipt, sendPartialInstallmentPaymentRec
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
 const pt = require('../services/paytriggerService');
+const { notifyUser } = require('../utils/notificationUtils');
 
 const now = () => new Date();
 
@@ -537,6 +538,16 @@ const verifyCashSubmissionOTP = async (req, res) => {
                 io.to(`user_${officerId}`).emit('cash_submission_completed', {
                     message: 'Cash submission verified and marked as paid successfully.',
                 });
+            }
+            if (officerId) {
+                notifyUser(
+                    officerId,
+                    'Cash Received by Outlet',
+                    `Your outlet has confirmed receipt of PKR ${totalAmount} cash.`,
+                    'cash_received',
+                    null,
+                    io
+                ).catch(err => console.error('notifyUser error:', err));
             }
         }
 
