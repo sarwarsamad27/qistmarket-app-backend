@@ -207,41 +207,43 @@ const verifyLoginOTP = async (req, res) => {
 
     // MULTI-DEVICE RESTRICTION:
     // If the user already has an active session_token (someone is logged in),
-    // AND the incoming device_id is different from the stored one,
-    // initiate a device-switch request instead of logging in directly.
+    // AND the incoming device_id is different from the stored one, the old
+    // device is force-logged-out immediately (no approval step) and this
+    // login proceeds right away.
     //
     // We use session_token (not device_id) as the source of truth because
     // device_id may be null for users who registered before this feature.
     //
     // Edge case: if device_id is missing/unknown, treat it as a different device
-    // to be safe (always require approval if someone is already logged in).
+    // to be safe (always force-logout the old session if one exists).
     const newDevice = device_id || null;
     const isAlreadyLoggedIn = !!user.session_token;
     const isSameDevice = newDevice && user.device_id && user.device_id === newDevice;
 
-    if (isAlreadyLoggedIn && !isSameDevice) {
-      // Create DeviceLoginRequest
-      const pendingRequest = await prisma.deviceLoginRequest.create({
-        data: {
-          user_id: user.id,
-          new_device_id: newDevice,
-          new_fcm_token: fcm_token || null,
-          status: 'pending',
-          created_at: new Date()
-        }
-      });
+    console.log(`[Login] user=${user.id} incoming_device=${newDevice} stored_device=${user.device_id} isAlreadyLoggedIn=${isAlreadyLoggedIn} isSameDevice=${isSameDevice} stored_session=${user.session_token ? user.session_token.slice(0, 8) + '...' : null}`);
 
-      // Emit socket.io event to user room
+    if (isAlreadyLoggedIn && !isSameDevice) {
+      // No approval needed — directly force-log-out the old device and
+      // continue straight into the login below.
+      //
+      // IMPORTANT: `user_${id}` is a shared room — ANY device that has ever
+      // logged into this account can still have a live (but stale) socket
+      // sitting in it, since the socket layer doesn't re-check session_token
+      // the way the HTTP middleware does. So we tag the event with the
+      // OLD session_token being replaced; each client compares that against
+      // its OWN current session id and only logs out if it actually matches
+      // (see home_controller.dart). Without this, whichever device's socket
+      // happens to still be connected reacts — not necessarily the right one.
+      const invalidatedSessionToken = user.session_token;
+
       const io = req.app.get('io');
       if (io) {
-        io.to(`user_${user.id}`).emit('device_login_request', {
-          request_id: pendingRequest.id,
-          new_device_id: newDevice,
-          message: 'This phone is trying to login your account.'
+        io.to(`user_${user.id}`).emit('force_logout', {
+          message: 'Logged out because your account was logged in on another device.',
+          invalidated_session_token: invalidatedSessionToken
         });
       }
 
-      // Also trigger a push notification via FCM
       if (user.fcm_token) {
         try {
           const admin = require('firebase-admin');
@@ -249,28 +251,22 @@ const verifyLoginOTP = async (req, res) => {
             await admin.messaging().send({
               token: user.fcm_token,
               notification: {
-                title: 'Login Request',
-                body: 'This phone is trying to login your account.'
+                title: 'Logged Out',
+                body: 'Your account was logged in on another device.'
               },
               data: {
                 click_action: 'FLUTTER_NOTIFICATION_CLICK',
-                type: 'device_login_request',
-                requestId: String(pendingRequest.id)
+                type: 'force_logout',
+                message: 'Your account was logged in on another device.',
+                invalidated_session_token: invalidatedSessionToken || ''
               }
             });
-            console.log(`Sent login request FCM to user ${user.id}`);
+            console.log(`Sent force_logout FCM to user ${user.id}`);
           }
         } catch (fcmErr) {
-          console.error('FCM send failed:', fcmErr);
+          console.error('FCM force_logout push failed:', fcmErr);
         }
       }
-
-      return res.json({
-        success: true,
-        device_request_pending: true,
-        requestId: pendingRequest.id,
-        message: 'This phone is trying to login your account. Approve from your current active device.'
-      });
     }
 
     // Direct login: Generate random session ID (64 chars hex)
