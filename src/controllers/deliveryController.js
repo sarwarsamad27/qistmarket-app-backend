@@ -1033,26 +1033,56 @@ const submitCashToOutlet = async (req, res) => {
 
     // If there is excess submit amount (e.g. balance is 0/negative or excess submission), link it to the last entry
     if (remainingToSubmit > 0) {
-      const targetEntry = lastEntry;
-      if (targetEntry) {
-        const existingIndex = historyCreations.findIndex(hc => hc.cash_in_hand_id === targetEntry.id);
-        if (existingIndex !== -1) {
-          historyCreations[existingIndex].amount_submitted += remainingToSubmit;
-        } else {
-          historyCreations.push({
-            cash_in_hand_id: targetEntry.id,
-            amount_submitted: remainingToSubmit,
-            status: 'pending',
-            otp: otp,
-            submission_ref: submissionRef,
-            outlet_id: payment_method === 'Online' ? null : parseInt(outlet_id),
-            submission_date: now()
-          });
+      let targetEntry = lastEntry;
+
+      // ✅ No cash entries exist at all yet (brand new officer / balance
+      // truly has nothing to link to). Wallet is allowed to go negative, so
+      // create a zero-value placeholder anchored to any order this officer
+      // is linked to, instead of blocking the submission outright.
+      if (!targetEntry) {
+        const anchorOrder = await prisma.order.findFirst({
+          where: {
+            OR: [
+              { delivery_officer_id: deliveryBoyId },
+              { recovery_officer_id: deliveryBoyId }
+            ]
+          },
+          orderBy: { created_at: 'desc' }
+        });
+
+        if (!anchorOrder) {
+          return res.status(400).json({ success: false, message: 'No cash collections found to link this submission to. Please collect some payment or deliver an order first.' });
         }
-        remainingToSubmit = 0;
-      } else {
-        return res.status(400).json({ success: false, message: 'No cash collections found to link this submission to. Please collect some payment or deliver an order first.' });
+
+        targetEntry = await prisma.cashInHand.create({
+          data: {
+            officer_id: deliveryBoyId,
+            order_id: anchorOrder.id,
+            amount: 0,
+            status: 'pending',
+            customer_name: anchorOrder.customer_name,
+            product_name: anchorOrder.product_name,
+            created_at: now(),
+            updated_at: now()
+          }
+        });
       }
+
+      const existingIndex = historyCreations.findIndex(hc => hc.cash_in_hand_id === targetEntry.id);
+      if (existingIndex !== -1) {
+        historyCreations[existingIndex].amount_submitted += remainingToSubmit;
+      } else {
+        historyCreations.push({
+          cash_in_hand_id: targetEntry.id,
+          amount_submitted: remainingToSubmit,
+          status: 'pending',
+          otp: otp,
+          submission_ref: submissionRef,
+          outlet_id: payment_method === 'Online' ? null : parseInt(outlet_id),
+          submission_date: now()
+        });
+      }
+      remainingToSubmit = 0;
     }
 
     // 3. Create the CashSubmissionHistory records
@@ -1230,6 +1260,47 @@ const submitCashToOutlet = async (req, res) => {
   }
 };
 
+// Cancel a pending cash submission (officer's own) — frees them up to submit
+// again, since a stuck/pending submission blocks any new submission.
+const cancelCashSubmission = async (req, res) => {
+  const { submission_ref } = req.params;
+  const deliveryBoyId = req.user?.id;
+
+  try {
+    const histories = await prisma.cashSubmissionHistory.findMany({
+      where: {
+        submission_ref,
+        status: 'pending',
+        cash_in_hand: { officer_id: deliveryBoyId }
+      }
+    });
+
+    if (histories.length === 0) {
+      return res.status(404).json({ success: false, message: 'No pending submission found to cancel' });
+    }
+
+    await prisma.cashSubmissionHistory.updateMany({
+      where: { submission_ref, status: 'pending' },
+      data: { status: 'cancelled', otp: null }
+    });
+
+    await prisma.officerTransaction.updateMany({
+      where: { submission_ref, type: 'debit', status: 'pending' },
+      data: { status: 'cancelled' }
+    });
+
+    // Clear the online-payment linkage too, in case this was an Online submission
+    await prisma.consumerNumber.updateMany({
+      where: { cash_submission_ref: submission_ref, user_id: deliveryBoyId },
+      data: { cash_submission_ref: null }
+    });
+
+    return res.json({ success: true, message: 'Cash submission cancelled successfully' });
+  } catch (error) {
+    console.error('cancelCashSubmission error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
 
 const generateDeliveryOtp = async (req, res) => {
   const { order_id, phone } = req.body;
@@ -2699,6 +2770,7 @@ module.exports = {
   // pickOrder,
   unpickOrder,
   submitCashToOutlet,
+  cancelCashSubmission,
   initiateReturnExchange,
   getDeliveryOfficerOTPLogs,
   submitSelfPickupDelivery,
