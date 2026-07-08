@@ -1515,6 +1515,9 @@ const verifyInstallmentPayment = async (req, res) => {
         rows[rowIndex].paid_at = now();
         rows[rowIndex].payment_method = payment_method;
         rows[rowIndex].feedback = feedback;
+        rows[rowIndex].collected_by = req.user.id;
+        rows[rowIndex].collected_by_outlet_id = outlet_id;
+        rows[rowIndex].collection_source = 'outlet';
 
         if (totalPaid >= dueAmount) {
             rows[rowIndex].status = 'paid';

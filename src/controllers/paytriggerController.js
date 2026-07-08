@@ -196,7 +196,7 @@ async function manualUnlock(req, res) {
 async function promiseToPay(req, res) {
   try {
     const { imei } = req.params;
-    const { promised_date, alternate_number } = req.body;
+    const { promised_date, alternate_number, latitude, longitude } = req.body;
     if (!promised_date) return res.status(400).json({ success: false, message: 'promised_date required' });
 
     const device = await prisma.payTriggerDevice.findUnique({ where: { imei } });
@@ -233,6 +233,8 @@ async function promiseToPay(req, res) {
       promised_date: promisedAt.toISOString(),
       previous_expiration: device.expiration?.toISOString(),
       status: 'active',
+      latitude: latitude !== undefined ? parseFloat(latitude) : null,
+      longitude: longitude !== undefined ? parseFloat(longitude) : null,
     };
     const history = Array.isArray(device.ptp_history) ? [...device.ptp_history, ptpEntry] : [ptpEntry];
 

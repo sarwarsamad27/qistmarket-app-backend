@@ -207,11 +207,8 @@ const getRecoveryCustomers = async (req, res) => {
             grantors: true,
           },
         },
-        delivery: {
-          include: {
-            installment_ledger: true,
-          },
-        },
+        delivery: true,
+        installment_ledger: true,
         cash_in_hand: {
           orderBy: { created_at: 'desc' },
           take: 1,
@@ -249,7 +246,7 @@ const getRecoveryCustomers = async (req, res) => {
       const purchaser = order.verification?.purchaser || null;
       const cashInHand = order.cash_in_hand?.[0] || null;
       const delivery = order.delivery;
-      const installmentLedgerModel = delivery?.installment_ledger || null;
+      const installmentLedgerModel = order.installment_ledger || null;
       const profilePhoto = order.verification?.documents?.[0]?.file_url || null;
 
       // ── Customer details: purchaser se, fallback Order ────────
@@ -314,6 +311,7 @@ const getRecoveryCustomers = async (req, res) => {
         status: order.status,
         is_delivered: isDelivered,
         delivery_date: deliveryDate,
+        recovery_assigned_at: order.recovery_assigned_at,
 
         product_details: {
           product_name: productName,
@@ -369,8 +367,14 @@ const getBranchCustomers = async (req, res) => {
 
     const orders = await prisma.order.findMany({
       where: {
-        outlet_id: officer.outlet_id,
         is_delivered: true,
+        // Everyone in the officer's own branch, PLUS any order assigned to
+        // this officer even if its outlet_id doesn't line up (assignment
+        // should never hide a customer the officer is responsible for).
+        OR: [
+          { outlet_id: officer.outlet_id },
+          { recovery_officer_id: officerId },
+        ],
       },
       include: {
         verification: {
@@ -384,11 +388,8 @@ const getBranchCustomers = async (req, res) => {
             grantors: true,
           },
         },
-        delivery: {
-          include: {
-            installment_ledger: true,
-          },
-        },
+        delivery: true,
+        installment_ledger: true,
         cash_in_hand: {
           orderBy: { created_at: 'desc' },
           take: 1,
@@ -425,7 +426,7 @@ const getBranchCustomers = async (req, res) => {
       const purchaser = order.verification?.purchaser || null;
       const cashInHand = order.cash_in_hand?.[0] || null;
       const delivery = order.delivery;
-      const installmentLedgerModel = delivery?.installment_ledger || null;
+      const installmentLedgerModel = order.installment_ledger || null;
       const profilePhoto = order.verification?.documents?.[0]?.file_url || null;
 
       const customerName = purchaser?.name;
@@ -576,6 +577,7 @@ const submitBranchPayment = async (req, res) => {
       rows[rowIndex].payment_method = payment_method;
       rows[rowIndex].feedback = feedback || 'Branch payment';
       rows[rowIndex].collected_by = officerId;
+      rows[rowIndex].collection_source = 'recovery_officer';
 
       if (totalPaid >= dueAmount) {
         rows[rowIndex].status = 'paid';
@@ -1032,6 +1034,7 @@ const submitInstallment = async (req, res) => {
       rows[rowIndex].payment_method = payment_method;
       rows[rowIndex].feedback = feedback;
       rows[rowIndex].collected_by = officerId;
+      rows[rowIndex].collection_source = 'recovery_officer';
       rows[rowIndex].fuel_charges = parseFloat(fuelCharges || 0);
 
       if (totalPaid >= dueAmount) {
@@ -1242,7 +1245,8 @@ const getCustomerFullProfile = async (req, res) => {
             verification_locations: true, // richer, labeled location captures
           },
         },
-        delivery: { include: { installment_ledger: true } },
+        delivery: true,
+        installment_ledger: true,
         paytrigger_devices: true,
       },
     });
@@ -1252,7 +1256,7 @@ const getCustomerFullProfile = async (req, res) => {
     }
 
     const purchaser = order.verification?.purchaser || null;
-    const normalized = getNormalizedLedger(order.delivery?.installment_ledger?.ledger_rows);
+    const normalized = getNormalizedLedger(order.installment_ledger?.ledger_rows);
 
     // ── Timeline: visits (feedback + location + photos) + PTP history ──────
     const visits = await prisma.recoveryVisit.findMany({
@@ -1282,13 +1286,60 @@ const getCustomerFullProfile = async (req, res) => {
           date: entry.date,
           promised_date: entry.promised_date,
           status: entry.status,
-          // ptp_history itself never captured location — if this promise was
-          // set through the app's Visit flow, the matching visit above (same
-          // timestamp) carries the actual location.
-          latitude: null,
-          longitude: null,
+          // Only present for PTPs set after location capture was added —
+          // older entries fall back to null (matching visit, if any, still
+          // carries its own location separately).
+          latitude: entry.latitude ?? null,
+          longitude: entry.longitude ?? null,
         });
       }
+    }
+
+    // ── Payments collected outside a recovery visit (outlet counter, online
+    // SmartPay QR) — these never create a recoveryVisit row, so without this
+    // they'd be invisible here. Recovery-officer payments are skipped since
+    // they already appear above via their matching 'visit' entry. Only rows
+    // tagged with collection_source (added after this fix) are covered —
+    // older untagged rows can't be reliably attributed after the fact.
+    let rawLedgerRows = order.installment_ledger?.ledger_rows;
+    if (typeof rawLedgerRows === 'string') {
+      try { rawLedgerRows = JSON.parse(rawLedgerRows); } catch { rawLedgerRows = []; }
+    }
+    const outsidePaymentRows = (Array.isArray(rawLedgerRows) ? rawLedgerRows : [])
+      .filter(r => parseFloat(r.paid_amount || 0) > 0 && ['outlet', 'online'].includes(r.collection_source));
+
+    const collectorIds = [...new Set(
+      outsidePaymentRows.filter(r => r.collection_source === 'outlet' && r.collected_by != null).map(r => Number(r.collected_by))
+    )];
+    const outletIds = [...new Set(
+      outsidePaymentRows.filter(r => r.collection_source === 'outlet' && r.collected_by_outlet_id != null).map(r => Number(r.collected_by_outlet_id))
+    )];
+    const [collectors, collectorOutlets] = await Promise.all([
+      collectorIds.length > 0
+        ? prisma.user.findMany({ where: { id: { in: collectorIds } }, select: { id: true, full_name: true } })
+        : Promise.resolve([]),
+      outletIds.length > 0
+        ? prisma.outlet.findMany({ where: { id: { in: outletIds } }, select: { id: true, name: true } })
+        : Promise.resolve([]),
+    ]);
+    const collectorNameMap = collectors.reduce((acc, u) => { acc[u.id] = u.full_name; return acc; }, {});
+    const outletNameMap = collectorOutlets.reduce((acc, o) => { acc[o.id] = o.name; return acc; }, {});
+
+    for (const row of outsidePaymentRows) {
+      timeline.push({
+        type: 'payment',
+        date: row.paid_at,
+        source: row.collection_source,
+        amount_collected: parseFloat(row.paid_amount || 0),
+        payment_method: row.payment_method || null,
+        collected_by_name: row.collection_source === 'outlet'
+          ? (collectorNameMap[Number(row.collected_by)] || null)
+          : null,
+        collected_by_outlet_name: row.collection_source === 'outlet'
+          ? (outletNameMap[Number(row.collected_by_outlet_id)] || null)
+          : null,
+        transaction_id: row.transaction_id || null,
+      });
     }
 
     timeline.sort((a, b) => new Date(b.date) - new Date(a.date));
@@ -1309,9 +1360,9 @@ const getCustomerFullProfile = async (req, res) => {
         },
         guarantors: (order.verification?.grantors || []).map(g => ({
           name: g.name,
-          relation: g.relation,
+          relation: g.relationship,
           telephone_number: g.telephone_number,
-          address: g.address,
+          address: g.present_address,
           nearest_location: g.nearest_location,
         })),
         ledger: normalized,
@@ -1606,9 +1657,33 @@ const getRecoveryDashboardStats = async (req, res) => {
         installment_ledger: true,
         verification: {
           include: { purchaser: true }
-        }
+        },
+        delivery: true,
+        cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 }
       }
     });
+
+    // ── Resolve the ACTUAL delivered product by IMEI, not the suggested
+    // product_name stored on the order at creation time ─────────────────
+    const activeOrdersImeis = activeRecoveryOrders
+      .map(o => o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial)
+      .filter(Boolean);
+
+    const activeOrdersInventories = await prisma.outletInventory.findMany({
+      where: { imei_serial: { in: activeOrdersImeis } },
+      select: { imei_serial: true, product_name: true }
+    });
+
+    const activeOrdersInventoryMap = new Map();
+    for (const inv of activeOrdersInventories) {
+      if (inv.imei_serial) activeOrdersInventoryMap.set(inv.imei_serial, inv);
+    }
+
+    const getDeliveredProductName = (order) => {
+      const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial;
+      const invInfo = imeiSerial ? activeOrdersInventoryMap.get(imeiSerial) : null;
+      return invInfo?.product_name || order.cash_in_hand?.[0]?.product_name || order.product_name || '';
+    };
 
     let todayInstallmentsCount = 0;
     let todayInstallmentsAmount = 0;
@@ -1643,10 +1718,14 @@ const getRecoveryDashboardStats = async (req, res) => {
               orderId: order.id,
               orderRef: order.order_ref || '',
               customerName: order.verification?.purchaser?.name || order.customer_name || '',
-              itemName: order.product_name || '',
+              itemName: getDeliveredProductName(order),
               installmentAmount: row.dueAmount || 0,
               remainingBalance: row.remainingAmount || 0,
-              totalRemaining: normalized.summary?.totalInstallmentRemaining || 0
+              totalRemaining: normalized.summary?.totalInstallmentRemaining || 0,
+              whatsappNumber: order.whatsapp_number || order.verification?.purchaser?.telephone_number || '',
+              address: order.address || order.verification?.purchaser?.present_address || '',
+              city: order.city || '',
+              area: order.area || order.verification?.purchaser?.present_area || ''
             });
           }
         });
@@ -1664,6 +1743,7 @@ const getRecoveryDashboardStats = async (req, res) => {
     const overdueAccounts = [];
     const defaulterAccounts = [];
     const blacklistAccounts = [];
+    const clearedAccounts = [];
 
     try {
       activeRecoveryOrders.forEach(order => {
@@ -1677,7 +1757,7 @@ const getRecoveryDashboardStats = async (req, res) => {
         const installments = normalized.installment_ledger; // already filtered month>0
 
         const customerName = order.verification?.purchaser?.name || order.customer_name || '';
-        const itemName = order.product_name || '';
+        const itemName = getDeliveredProductName(order);
         const orderRef = order.order_ref || '';
         const orderId = order.id;
 
@@ -1743,6 +1823,19 @@ const getRecoveryDashboardStats = async (req, res) => {
             });
           }
         }
+
+        // ── CLEARED: assigned to this officer, fully paid off, 0 balance ──
+        if (normalized.summary.installmentsStarted &&
+          normalized.summary.grandTotalDue > 0 &&
+          normalized.summary.grandTotalRemaining === 0) {
+          clearedAccounts.push({
+            orderId, orderRef, customerName, itemName,
+            installmentAmount: 0,
+            remainingBalance: 0,
+            totalPaid: normalized.summary.grandTotalPaid,
+            totalRemaining: 0
+          });
+        }
       });
     } catch (classifyError) {
       console.error('[Overdue/Defaulter/Blacklist] Error:', classifyError.message);
@@ -1800,6 +1893,10 @@ const getRecoveryDashboardStats = async (req, res) => {
           count: blacklistAccounts.length,
           accounts: blacklistAccounts
         },
+        cleared: {
+          count: clearedAccounts.length,
+          accounts: clearedAccounts
+        },
         visitStats,
         targetTracking: {
           achievedAmount,
@@ -1853,9 +1950,27 @@ const getRecoveryFuelCharges = async (req, res) => {
       },
       include: {
         installment_ledger: true,
-        verification: { include: { purchaser: true } }
+        verification: { include: { purchaser: true } },
+        delivery: true,
+        cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 }
       }
     });
+
+    // ── Resolve the ACTUAL delivered product by IMEI, not the suggested
+    // product_name stored on the order at creation time ─────────────────
+    const fuelOrdersImeis = orders
+      .map(o => o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial)
+      .filter(Boolean);
+
+    const fuelOrdersInventories = await prisma.outletInventory.findMany({
+      where: { imei_serial: { in: fuelOrdersImeis } },
+      select: { imei_serial: true, product_name: true }
+    });
+
+    const fuelOrdersInventoryMap = new Map();
+    for (const inv of fuelOrdersInventories) {
+      if (inv.imei_serial) fuelOrdersInventoryMap.set(inv.imei_serial, inv);
+    }
 
     let totalFuelAmount = 0;
     const entries = [];
@@ -1868,6 +1983,10 @@ const getRecoveryFuelCharges = async (req, res) => {
       if (!Array.isArray(rawRows)) return;
 
       const normalized = getNormalizedLedger(rawRows);
+
+      const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial;
+      const invInfo = imeiSerial ? fuelOrdersInventoryMap.get(imeiSerial) : null;
+      const deliveredProductName = invInfo?.product_name || order.cash_in_hand?.[0]?.product_name || order.product_name || '';
 
       normalized.rows.forEach(row => {
         const fuelAmount = parseFloat(row.fuel_charges || 0);
@@ -1883,7 +2002,7 @@ const getRecoveryFuelCharges = async (req, res) => {
           orderId: order.id,
           orderRef: order.order_ref || '',
           customerName: order.verification?.purchaser?.name || order.customer_name || '',
-          itemName: order.product_name || '',
+          itemName: deliveredProductName,
           monthNumber: row.month ?? 0,
           fuelAmount,
           paymentAmount: parseFloat(row.paid_amount || 0),
@@ -1946,9 +2065,27 @@ const getRecoveryCollectedPayments = async (req, res) => {
       },
       include: {
         installment_ledger: true,
-        verification: { include: { purchaser: true } }
+        verification: { include: { purchaser: true } },
+        delivery: true,
+        cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 }
       }
     });
+
+    // ── Resolve the ACTUAL delivered product by IMEI, not the suggested
+    // product_name stored on the order at creation time ─────────────────
+    const allImeis = orders
+      .map(o => o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial)
+      .filter(Boolean);
+
+    const inventories = await prisma.outletInventory.findMany({
+      where: { imei_serial: { in: allImeis } },
+      select: { imei_serial: true, product_name: true }
+    });
+
+    const inventoryMap = new Map();
+    for (const inv of inventories) {
+      if (inv.imei_serial) inventoryMap.set(inv.imei_serial, inv);
+    }
 
     const isCashMethod = (m) => ['cash', 'recovery_cash', 'recovery cash'].includes((m || '').toLowerCase());
 
@@ -1963,6 +2100,10 @@ const getRecoveryCollectedPayments = async (req, res) => {
 
       const normalized = getNormalizedLedger(rawRows);
 
+      const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial;
+      const invInfo = imeiSerial ? inventoryMap.get(imeiSerial) : null;
+      const deliveredProductName = invInfo?.product_name || order.cash_in_hand?.[0]?.product_name || order.product_name || '';
+
       normalized.rows.forEach(row => {
         const paymentAmount = parseFloat(row.paid_amount || 0);
         if (paymentAmount <= 0) return;
@@ -1975,7 +2116,7 @@ const getRecoveryCollectedPayments = async (req, res) => {
           orderId: order.id,
           orderRef: order.order_ref || '',
           customerName: order.verification?.purchaser?.name || order.customer_name || '',
-          itemName: order.product_name || '',
+          itemName: deliveredProductName,
           monthNumber: row.month ?? 0,
           amount: paymentAmount,
           paymentMethod: row.payment_method || '',
@@ -2138,7 +2279,13 @@ const getRecoveryPtpList = async (req, res) => {
     // Get all active orders for this recovery officer
     const orders = await prisma.order.findMany({
       where: { recovery_officer_id: officerId, is_delivered: true },
-      select: { id: true, order_ref: true, customer_name: true, whatsapp_number: true, city: true, area: true },
+      select: {
+        id: true, order_ref: true, customer_name: true, whatsapp_number: true, city: true, area: true,
+        product_name: true, imei_serial: true,
+        installment_ledger: true,
+        delivery: true,
+        cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 }
+      },
     });
 
     if (orders.length === 0) {
@@ -2147,6 +2294,28 @@ const getRecoveryPtpList = async (req, res) => {
 
     const orderIds = orders.map(o => o.id);
     const orderMap = new Map(orders.map(o => [o.id, o]));
+
+    // ── Resolve the ACTUAL delivered product by IMEI, not the suggested
+    // product_name stored on the order at creation time ─────────────────
+    const ptpOrdersImeis = orders
+      .map(o => o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial)
+      .filter(Boolean);
+
+    const ptpOrdersInventories = await prisma.outletInventory.findMany({
+      where: { imei_serial: { in: ptpOrdersImeis } },
+      select: { imei_serial: true, product_name: true }
+    });
+
+    const ptpOrdersInventoryMap = new Map();
+    for (const inv of ptpOrdersInventories) {
+      if (inv.imei_serial) ptpOrdersInventoryMap.set(inv.imei_serial, inv);
+    }
+
+    const getDeliveredProductName = (order) => {
+      const imeiSerial = order?.cash_in_hand?.[0]?.imei_serial || order?.delivery?.product_imei || order?.imei_serial;
+      const invInfo = imeiSerial ? ptpOrdersInventoryMap.get(imeiSerial) : null;
+      return invInfo?.product_name || order?.cash_in_hand?.[0]?.product_name || order?.product_name || '';
+    };
 
     // Date range for filter
     let dateWhere = {};
@@ -2178,11 +2347,36 @@ const getRecoveryPtpList = async (req, res) => {
       orderBy: { promised_date: 'desc' },
     });
 
+    // Pulls the next unpaid installment (amount/date) + overall remaining
+    // balance for an order, so the mobile app can sort PTP accounts by them.
+    const getOrderLedgerBrief = (order) => {
+      const empty = { installmentAmount: 0, remainingBalance: 0, totalRemaining: 0, nextInstallmentDate: null };
+      try {
+        let rawRows = order?.installment_ledger?.ledger_rows;
+        if (!rawRows) return empty;
+        if (typeof rawRows === 'string') rawRows = JSON.parse(rawRows);
+        if (!Array.isArray(rawRows)) return empty;
+
+        const normalized = getNormalizedLedger(rawRows);
+        const nextUnpaid = normalized.installment_ledger.find(r => r.status !== 'paid');
+
+        return {
+          installmentAmount: nextUnpaid?.dueAmount || 0,
+          remainingBalance: nextUnpaid?.remainingAmount || 0,
+          totalRemaining: normalized.summary?.totalInstallmentRemaining || 0,
+          nextInstallmentDate: nextUnpaid?.dueDate || null,
+        };
+      } catch (e) {
+        return empty;
+      }
+    };
+
     const summary = { active: 0, fulfilled: 0, broken: 0 };
     const ptpList = devices.map(device => {
       const order = orderMap.get(device.order_id);
       const status = device.ptp_status || 'active';
       if (summary[status] !== undefined) summary[status]++;
+      const ledgerBrief = getOrderLedgerBrief(order);
 
       return {
         id: device.id,
@@ -2194,6 +2388,11 @@ const getRecoveryPtpList = async (req, res) => {
         city: order?.city || null,
         area: order?.area || null,
         productModel: device.product_model || null,
+        itemName: getDeliveredProductName(order) || device.product_model || null,
+        installmentAmount: ledgerBrief.installmentAmount,
+        remainingBalance: ledgerBrief.remainingBalance,
+        totalRemaining: ledgerBrief.totalRemaining,
+        nextInstallmentDate: ledgerBrief.nextInstallmentDate,
         ptpStatus: status,
         promisedDate: device.promised_date?.toISOString() || null,
         previousExpiration: device.expiration?.toISOString() || null,

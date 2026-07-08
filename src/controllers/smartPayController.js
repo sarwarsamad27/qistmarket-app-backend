@@ -520,6 +520,8 @@ const notifyPayment = async (req, res) => {
                     rows[i].paid_amount = newPaid;
                     rows[i].paid_at = paidDateParsed;
                     rows[i].payment_method = `SmartPay QR`;
+                    rows[i].collection_source = 'online';
+                    rows[i].transaction_id = transactionId || null;
 
                     // Maintain cumulative payment history for this installment row
                     if (!rows[i].payment_history) {
