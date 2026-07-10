@@ -6,6 +6,7 @@ const {
   sendInstallmentPaymentReceipt,
   sendPartialInstallmentPaymentReceipt,
   sendNextInstallmentReminder,
+  sendPtpConfirmation,
   sendToMany,
   getCompanyNotifyPhones
 } = require('../services/watiService');
@@ -645,7 +646,7 @@ const submitBranchPayment = async (req, res) => {
     const altPhone = (alternate_number && String(alternate_number).trim())
       || order.verification?.purchaser?.alternate_contact
       || order.alternate_contact;
-    const notifyPhones = [phone, altPhone, ...getCompanyNotifyPhones()];
+    const notifyPhones = [phone, altPhone, req.user?.phone, ...getCompanyNotifyPhones()];
 
     if (totalPaid >= dueAmount) {
       sendToMany(notifyPhones, (p) => sendInstallmentPaymentReceipt(p, {
@@ -868,7 +869,7 @@ const generateInstallmentOtp = async (req, res) => {
 
 // API for logging visit ONLY (when payment is NOT collected)
 const logRecoveryVisit = async (req, res) => {
-  const { order_id, latitude, longitude, customer_feedback, visit_notes } = req.body;
+  const { order_id, latitude, longitude, customer_feedback, visit_notes, promised_date } = req.body;
   const officerId = req.user?.id || 24;
 
   // Extract uploaded files
@@ -893,13 +894,17 @@ const logRecoveryVisit = async (req, res) => {
     const order = await prisma.order.findUnique({
       where: { id: parseInt(order_id) },
       include: {
-        verification: { include: { documents: { where: { document_type: 'photo', person_type: 'purchaser' }, orderBy: { uploaded_at: 'desc' }, take: 1 } } }
+        verification: { include: { purchaser: true, documents: { where: { document_type: 'photo', person_type: 'purchaser' }, orderBy: { uploaded_at: 'desc' }, take: 1 } } },
+        installment_ledger: true,
+        cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 }
       }
     });
 
     if (!order) {
       return res.status(404).json({ success: false, message: 'Order not found' });
     }
+
+    const parsedPromisedDate = promised_date ? new Date(promised_date) : null;
 
     // Use transaction for visit and photos
     const result = await prisma.$transaction(async (tx) => {
@@ -914,6 +919,7 @@ const logRecoveryVisit = async (req, res) => {
           visit_notes,
           payment_collected: false,
           amount_collected: null,
+          promised_date: parsedPromisedDate,
           created_at: now()   // ✅ explicit created_at
         }
       });
@@ -960,6 +966,35 @@ const logRecoveryVisit = async (req, res) => {
       return visit;
     });
 
+    // Officer set a Promise to Pay during this (no-payment) visit — notify
+    // customer + alternate + officer + company so the promise is actually
+    // visible to the customer, not just recorded in the app.
+    if (parsedPromisedDate) {
+      const customerName = order.verification?.purchaser?.name || order.customer_name;
+      const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+      const altPhone = order.verification?.purchaser?.alternate_contact || order.alternate_contact;
+      const notifyPhones = [phone, altPhone, req.user?.phone, ...getCompanyNotifyPhones()];
+      const finalProductName = order.cash_in_hand?.[0]?.product_name || order.product_name;
+
+      let amountDue = 0;
+      try {
+        const rawRows = order.installment_ledger?.ledger_rows;
+        if (rawRows) {
+          const normalized = getNormalizedLedger(Array.isArray(rawRows) ? rawRows : JSON.parse(rawRows));
+          const pendingRow = normalized.installment_ledger.find(r => (r.status || '').toLowerCase() !== 'paid');
+          amountDue = pendingRow?.remainingAmount ?? pendingRow?.dueAmount ?? 0;
+        }
+      } catch (e) { /* amountDue stays 0 if ledger can't be parsed */ }
+
+      sendToMany(notifyPhones, (p) => sendPtpConfirmation(p, {
+        customerName,
+        productName: finalProductName,
+        orderRef: order.order_ref,
+        promisedDate: parsedPromisedDate.toLocaleDateString('en-PK'),
+        amountDue,
+      })).catch(err => console.error('Wati PTP Confirmation Error:', err));
+    }
+
     return res.json({ success: true, message: 'Recovery visit logged successfully with photos', visit: result });
   } catch (error) {
     console.error('logRecoveryVisit error:', error);
@@ -970,7 +1005,7 @@ const logRecoveryVisit = async (req, res) => {
 const submitInstallment = async (req, res) => {
   const {
     order_id, month_number, amount, payment_method, feedback, fuelCharges,
-    latitude, longitude, visit_notes, alternate_number
+    latitude, longitude, visit_notes, alternate_number, promised_date
   } = req.body;
   const officerId = req.user?.id;
 
@@ -1026,6 +1061,7 @@ const submitInstallment = async (req, res) => {
 
     const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial;
     const finalProductName = order.cash_in_hand?.[0]?.product_name || order.product_name;
+    const parsedPromisedDate = promised_date ? new Date(promised_date) : null;
 
     // DB Transaction
     await prisma.$transaction(async (tx) => {
@@ -1098,6 +1134,7 @@ const submitInstallment = async (req, res) => {
           visit_notes: visit_notes,
           payment_collected: true,
           amount_collected: payingNow,
+          promised_date: parsedPromisedDate,
           created_at: now()   // ✅ explicit created_at
         }
       });
@@ -1132,13 +1169,13 @@ const submitInstallment = async (req, res) => {
       }
     });
 
-    // Wati Notifications — customer + alternate number (officer-entered or on file) + company copy
+    // Wati Notifications — customer + alternate number (officer-entered or on file) + the officer + company copy
     const customerName = order.verification?.purchaser?.name || order.customer_name;
     const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
     const altPhone = (alternate_number && String(alternate_number).trim())
       || order.verification?.purchaser?.alternate_contact
       || order.alternate_contact;
-    const notifyPhones = [phone, altPhone, ...getCompanyNotifyPhones()];
+    const notifyPhones = [phone, altPhone, req.user?.phone, ...getCompanyNotifyPhones()];
 
     if (totalPaid >= dueAmount) {
       sendToMany(notifyPhones, (p) => sendInstallmentPaymentReceipt(p, {
@@ -1168,6 +1205,19 @@ const submitInstallment = async (req, res) => {
         dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
         ledgerUrl: ledger.token ? `${ledger.token}` : null
       })).catch(err => console.error('Wati Reminder Error:', err));
+    }
+
+    // Officer set a new Promise to Pay during this visit — send a dedicated
+    // confirmation so the customer actually sees the promised date (the
+    // receipt/reminder templates above don't carry it).
+    if (parsedPromisedDate) {
+      sendToMany(notifyPhones, (p) => sendPtpConfirmation(p, {
+        customerName,
+        productName: finalProductName,
+        orderRef: order.order_ref,
+        promisedDate: parsedPromisedDate.toLocaleDateString('en-PK'),
+        amountDue: Math.max(0, dueAmount - totalPaid),
+      })).catch(err => console.error('Wati PTP Confirmation Error:', err));
     }
 
     // await logAction(...) commented out
@@ -1663,6 +1713,23 @@ const getRecoveryDashboardStats = async (req, res) => {
       }
     });
 
+    const officerOrderIds = activeRecoveryOrders.map(o => o.id);
+    const ptpDevices = await prisma.payTriggerDevice.findMany({
+      where: {
+        order_id: { in: officerOrderIds },
+        ptp_status: { in: ['active', 'broken', 'fulfilled'] }
+      },
+      select: { order_id: true, ptp_status: true }
+    });
+
+    const ptpStats = { active: 0, broken: 0, fulfilled: 0 };
+    for (const d of ptpDevices) {
+      if (ptpStats[d.ptp_status] !== undefined) {
+        ptpStats[d.ptp_status]++;
+      }
+    }
+
+
     // ── Resolve the ACTUAL delivered product by IMEI, not the suggested
     // product_name stored on the order at creation time ─────────────────
     const activeOrdersImeis = activeRecoveryOrders
@@ -1718,6 +1785,7 @@ const getRecoveryDashboardStats = async (req, res) => {
               orderId: order.id,
               orderRef: order.order_ref || '',
               customerName: order.verification?.purchaser?.name || order.customer_name || '',
+              cnicNumber: order.verification?.purchaser?.cnic_number || null,
               itemName: getDeliveredProductName(order),
               installmentAmount: row.dueAmount || 0,
               remainingBalance: row.remainingAmount || 0,
@@ -1757,6 +1825,7 @@ const getRecoveryDashboardStats = async (req, res) => {
         const installments = normalized.installment_ledger; // already filtered month>0
 
         const customerName = order.verification?.purchaser?.name || order.customer_name || '';
+        const cnicNumber = order.verification?.purchaser?.cnic_number || null;
         const itemName = getDeliveredProductName(order);
         const orderRef = order.order_ref || '';
         const orderId = order.id;
@@ -1773,7 +1842,7 @@ const getRecoveryDashboardStats = async (req, res) => {
         if (overdueRows.length === 1) {
           const totalOverdue = overdueRows.reduce((s, r) => s + (r.remainingAmount || 0), 0);
           regularAccounts.push({
-            orderId, orderRef, customerName, itemName,
+            orderId, orderRef, customerName, cnicNumber, itemName,
             overdueMonths: overdueRows.length,
             overdueAmount: totalOverdue,
             totalRemaining: normalized.summary.totalInstallmentRemaining
@@ -1781,7 +1850,7 @@ const getRecoveryDashboardStats = async (req, res) => {
         } else if (overdueRows.length >= 2) {
           const totalOverdue = overdueRows.reduce((s, r) => s + (r.remainingAmount || 0), 0);
           overdueAccounts.push({
-            orderId, orderRef, customerName, itemName,
+            orderId, orderRef, customerName, cnicNumber, itemName,
             overdueMonths: overdueRows.length,
             overdueAmount: totalOverdue,
             totalRemaining: normalized.summary.totalInstallmentRemaining
@@ -1799,7 +1868,7 @@ const getRecoveryDashboardStats = async (req, res) => {
           const totalPaidInPeriod = last3Rows.reduce((s, r) => s + (r.paidAmount || 0), 0);
           if (totalPaidInPeriod === 0) {
             defaulterAccounts.push({
-              orderId, orderRef, customerName, itemName,
+              orderId, orderRef, customerName, cnicNumber, itemName,
               missedMonths: last3Rows.length,
               missedAmount: last3Rows.reduce((s, r) => s + (r.dueAmount || 0), 0),
               totalRemaining: normalized.summary.totalInstallmentRemaining
@@ -1815,7 +1884,7 @@ const getRecoveryDashboardStats = async (req, res) => {
           if (totalPaidInPeriod > 0 && totalDueInPeriod > 0 &&
             totalPaidInPeriod < totalDueInPeriod * 0.5) {
             blacklistAccounts.push({
-              orderId, orderRef, customerName, itemName,
+              orderId, orderRef, customerName, cnicNumber, itemName,
               paidInPeriod: totalPaidInPeriod,
               dueInPeriod: totalDueInPeriod,
               coveragePercent: Math.round((totalPaidInPeriod / totalDueInPeriod) * 100),
@@ -1829,7 +1898,7 @@ const getRecoveryDashboardStats = async (req, res) => {
           normalized.summary.grandTotalDue > 0 &&
           normalized.summary.grandTotalRemaining === 0) {
           clearedAccounts.push({
-            orderId, orderRef, customerName, itemName,
+            orderId, orderRef, customerName, cnicNumber, itemName,
             installmentAmount: 0,
             remainingBalance: 0,
             totalPaid: normalized.summary.grandTotalPaid,
@@ -1898,6 +1967,7 @@ const getRecoveryDashboardStats = async (req, res) => {
           accounts: clearedAccounts
         },
         visitStats,
+        ptp: ptpStats,
         targetTracking: {
           achievedAmount,
           targetAmount: monthlyTarget,
@@ -2002,6 +2072,7 @@ const getRecoveryFuelCharges = async (req, res) => {
           orderId: order.id,
           orderRef: order.order_ref || '',
           customerName: order.verification?.purchaser?.name || order.customer_name || '',
+          cnicNumber: order.verification?.purchaser?.cnic_number || null,
           itemName: deliveredProductName,
           monthNumber: row.month ?? 0,
           fuelAmount,
@@ -2284,7 +2355,8 @@ const getRecoveryPtpList = async (req, res) => {
         product_name: true, imei_serial: true,
         installment_ledger: true,
         delivery: true,
-        cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 }
+        cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 },
+        verification: { select: { purchaser: { select: { name: true, cnic_number: true } } } }
       },
     });
 
@@ -2337,15 +2409,38 @@ const getRecoveryPtpList = async (req, res) => {
       }
     }
 
-    // Fetch PayTrigger devices for these orders that have a PTP record
-    const devices = await prisma.payTriggerDevice.findMany({
+    // ── Source of truth: RecoveryVisit.promised_date ────────────────────────
+    // A promise is recorded here the moment the officer sets it — whether or
+    // not the order has a PayTrigger-enrolled device. Device enrollment only
+    // adds an optional unlock action on top; it never gates the promise
+    // itself from showing up here.
+    const visits = await prisma.recoveryVisit.findMany({
       where: {
         order_id: { in: orderIds },
-        ptp_status: { not: 'none' },
+        promised_date: { not: null },
         ...dateWhere,
       },
-      orderBy: { promised_date: 'desc' },
+      orderBy: { created_at: 'desc' },
     });
+
+    // A renewed/extended promise replaces the old one — keep only the most
+    // recently created visit per order so the same order never shows up
+    // twice (once with the stale promise, once with the new one).
+    const latestVisitByOrderId = new Map();
+    for (const visit of visits) {
+      if (!latestVisitByOrderId.has(visit.order_id)) {
+        latestVisitByOrderId.set(visit.order_id, visit);
+      }
+    }
+    const latestVisits = Array.from(latestVisitByOrderId.values());
+
+    // Best-effort device lookup per order — purely for showing lock/unlock
+    // context on an entry when one happens to exist; absence of a device
+    // never excludes the promise from this list.
+    const devices = await prisma.payTriggerDevice.findMany({
+      where: { order_id: { in: orderIds } },
+    });
+    const deviceByOrderId = new Map(devices.map(d => [d.order_id, d]));
 
     // Pulls the next unpaid installment (amount/date) + overall remaining
     // balance for an order, so the mobile app can sort PTP accounts by them.
@@ -2372,35 +2467,45 @@ const getRecoveryPtpList = async (req, res) => {
     };
 
     const summary = { active: 0, fulfilled: 0, broken: 0 };
-    const ptpList = devices.map(device => {
-      const order = orderMap.get(device.order_id);
-      const status = device.ptp_status || 'active';
-      if (summary[status] !== undefined) summary[status]++;
+    const nowDt2 = new Date();
+    const ptpList = [];
+    for (const visit of latestVisits) {
+      const order = orderMap.get(visit.order_id);
+      const device = deviceByOrderId.get(visit.order_id) || null;
       const ledgerBrief = getOrderLedgerBrief(order);
 
-      return {
-        id: device.id,
-        imei: device.imei,
-        orderId: device.order_id,
-        orderRef: order?.order_ref || device.order_ref || 'N/A',
-        customerName: order?.customer_name || 'Unknown',
+      // Fully paid — the promise no longer applies, so drop it from PTP
+      // entirely instead of leaving it sitting under "Fulfilled".
+      if (ledgerBrief.totalRemaining === 0) continue;
+
+      const status = visit.promised_date < nowDt2 ? 'broken' : 'active';
+      summary[status]++;
+
+      ptpList.push({
+        id: visit.id,
+        imei: device?.imei || order?.imei_serial || '',
+        orderId: visit.order_id,
+        orderRef: order?.order_ref || 'N/A',
+        customerName: order?.verification?.purchaser?.name || order?.customer_name || 'Unknown',
+        cnicNumber: order?.verification?.purchaser?.cnic_number || null,
         whatsappNumber: order?.whatsapp_number || null,
         city: order?.city || null,
         area: order?.area || null,
-        productModel: device.product_model || null,
-        itemName: getDeliveredProductName(order) || device.product_model || null,
+        productModel: device?.product_model || null,
+        itemName: getDeliveredProductName(order) || device?.product_model || null,
         installmentAmount: ledgerBrief.installmentAmount,
         remainingBalance: ledgerBrief.remainingBalance,
         totalRemaining: ledgerBrief.totalRemaining,
         nextInstallmentDate: ledgerBrief.nextInstallmentDate,
         ptpStatus: status,
-        promisedDate: device.promised_date?.toISOString() || null,
-        previousExpiration: device.expiration?.toISOString() || null,
-        history: Array.isArray(device.ptp_history) ? device.ptp_history : [],
-        createdAt: device.created_at?.toISOString() || null,
-        updatedAt: device.updated_at?.toISOString() || null,
-      };
-    });
+        promisedDate: visit.promised_date?.toISOString() || null,
+        previousExpiration: device?.expiration?.toISOString() || null,
+        history: [],
+        createdAt: visit.created_at?.toISOString() || null,
+        updatedAt: visit.created_at?.toISOString() || null,
+        deviceEnrolled: !!device,
+      });
+    }
 
     return res.json({
       success: true,

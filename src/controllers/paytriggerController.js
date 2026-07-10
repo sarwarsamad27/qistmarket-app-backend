@@ -477,32 +477,61 @@ async function checkOverdueDevices(io = null) {
       }
     }
 
-    // Check PTP expired promises
+    // Check PTP promises (can be resolved early if they pay, or marked broken if expired)
     const ptpDevices = await prisma.payTriggerDevice.findMany({
       where: {
         ptp_status: 'active',
-        promised_date: { lt: now() },
       },
     });
 
     for (const device of ptpDevices) {
-      // Check if payment was made since PTP
-      const recentPayment = await prisma.orderPayment.findFirst({
+      // 1. Check if payment was made since PTP
+      const recentOrderPayment = await prisma.orderPayment.findFirst({
         where: { order_id: device.order_id, created_at: { gte: device.updated_at } },
       });
 
-      if (!recentPayment) {
-        // No payment, mark PTP as broken
+      let hasPaid = !!recentOrderPayment;
+
+      if (!hasPaid && device.order_id) {
+        const order = await prisma.order.findUnique({
+          where: { id: device.order_id },
+          select: { installment_ledger: { select: { ledger_rows: true } } }
+        });
+
+        let rawRows = order?.installment_ledger?.ledger_rows || [];
+        if (typeof rawRows === 'string') rawRows = JSON.parse(rawRows);
+        const ptpCreatedAt = device.updated_at;
+
+        hasPaid = Array.isArray(rawRows) && rawRows.some(r => {
+          const paidAt = r.paid_at ? new Date(r.paid_at) : null;
+          return paidAt && paidAt > ptpCreatedAt && parseFloat(r.paid_amount || 0) > 0;
+        });
+      }
+
+      const isExpired = device.promised_date ? new Date(device.promised_date) < now() : false;
+
+      if (hasPaid) {
+        // Fulfill PTP
+        const history = Array.isArray(device.ptp_history) ? [...device.ptp_history] : [];
+        if (history.length > 0) {
+          history[history.length - 1].status = 'fulfilled';
+        }
         await prisma.payTriggerDevice.update({
           where: { id: device.id },
-          data: { ptp_status: 'broken' },
+          data: { ptp_status: 'fulfilled', ptp_history: history },
+        });
+        console.log(`[PayTrigger] PTP fulfilled for device ${device.imei}`);
+      } else if (isExpired) {
+        // Expired and not paid, mark PTP as broken
+        const history = Array.isArray(device.ptp_history) ? [...device.ptp_history] : [];
+        if (history.length > 0) {
+          history[history.length - 1].status = 'broken';
+        }
+        await prisma.payTriggerDevice.update({
+          where: { id: device.id },
+          data: { ptp_status: 'broken', ptp_history: history },
         });
         console.log(`[PayTrigger] PTP broken for device ${device.imei}`);
-      } else {
-        await prisma.payTriggerDevice.update({
-          where: { id: device.id },
-          data: { ptp_status: 'fulfilled' },
-        });
       }
     }
 
@@ -593,12 +622,12 @@ async function updateDeviceRepayInfo(req, res) {
     const device = await prisma.payTriggerDevice.findUnique({ where: { imei } });
     if (!device) return res.status(404).json({ success: false, message: 'Device not found' });
     if (!pt.ENABLED()) return res.json({ success: false, message: 'PayTrigger disabled', skipped: true });
-    const result = await pt.updateRepayInfo({ 
-      imei, 
-      deviceTag: device.device_tag, 
-      orderNum: device.order_ref, 
-      phoneNum: '', 
-      repayedAmt, totalAmt, nextRepayTime: new Date(nextRepayTime), nextRepayAmt, currentTerm, totalTerm, currencyType, description 
+    const result = await pt.updateRepayInfo({
+      imei,
+      deviceTag: device.device_tag,
+      orderNum: device.order_ref,
+      phoneNum: '',
+      repayedAmt, totalAmt, nextRepayTime: new Date(nextRepayTime), nextRepayAmt, currentTerm, totalTerm, currencyType, description
     });
     return res.json({ success: true, data: result });
   } catch (error) {
@@ -693,11 +722,11 @@ async function getDeviceTagRemote(req, res) {
   try {
     const { imei } = req.params;
     if (!imei) return res.status(400).json({ success: false, message: 'IMEI required' });
-    
+
     if (!pt.ENABLED()) return res.json({ success: false, message: 'PayTrigger disabled', skipped: true });
 
     const result = await pt.getDeviceTag(imei);
-    
+
     if (result?.code === 200 && result?.data?.deviceTag) {
       await prisma.payTriggerDevice.updateMany({
         where: { imei },

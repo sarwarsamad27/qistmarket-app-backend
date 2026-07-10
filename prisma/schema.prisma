@@ -1066,6 +1066,10 @@ model RecoveryVisit {
   payment_collected Boolean              @default(false)
   amount_collected  Float?
   fuel_charges      Float?               @default(0)
+  // Promise to Pay set during this visit — independent of PayTrigger device
+  // enrollment, so it still shows up in PTP Accounts even when there's no
+  // lockable device on the order (or enrollment failed/wasn't done).
+  promised_date     DateTime?
   created_at        DateTime             @default(now())
   photos            RecoveryVisitPhoto[]
   officer           User                 @relation("OfficerRecoveryVisit", fields: [officer_id], references: [id])
