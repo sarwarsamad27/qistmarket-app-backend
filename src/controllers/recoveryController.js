@@ -6,6 +6,7 @@ const {
   sendInstallmentPaymentReceipt,
   sendPartialInstallmentPaymentReceipt,
   sendNextInstallmentReminder,
+  sendPtpConfirmation,
   sendToMany,
   getCompanyNotifyPhones
 } = require('../services/watiService');
@@ -207,11 +208,8 @@ const getRecoveryCustomers = async (req, res) => {
             grantors: true,
           },
         },
-        delivery: {
-          include: {
-            installment_ledger: true,
-          },
-        },
+        delivery: true,
+        installment_ledger: true,
         cash_in_hand: {
           orderBy: { created_at: 'desc' },
           take: 1,
@@ -249,7 +247,7 @@ const getRecoveryCustomers = async (req, res) => {
       const purchaser = order.verification?.purchaser || null;
       const cashInHand = order.cash_in_hand?.[0] || null;
       const delivery = order.delivery;
-      const installmentLedgerModel = delivery?.installment_ledger || null;
+      const installmentLedgerModel = order.installment_ledger || null;
       const profilePhoto = order.verification?.documents?.[0]?.file_url || null;
 
       // ── Customer details: purchaser se, fallback Order ────────
@@ -314,6 +312,7 @@ const getRecoveryCustomers = async (req, res) => {
         status: order.status,
         is_delivered: isDelivered,
         delivery_date: deliveryDate,
+        recovery_assigned_at: order.recovery_assigned_at,
 
         product_details: {
           product_name: productName,
@@ -369,8 +368,14 @@ const getBranchCustomers = async (req, res) => {
 
     const orders = await prisma.order.findMany({
       where: {
-        outlet_id: officer.outlet_id,
         is_delivered: true,
+        // Everyone in the officer's own branch, PLUS any order assigned to
+        // this officer even if its outlet_id doesn't line up (assignment
+        // should never hide a customer the officer is responsible for).
+        OR: [
+          { outlet_id: officer.outlet_id },
+          { recovery_officer_id: officerId },
+        ],
       },
       include: {
         verification: {
@@ -384,11 +389,8 @@ const getBranchCustomers = async (req, res) => {
             grantors: true,
           },
         },
-        delivery: {
-          include: {
-            installment_ledger: true,
-          },
-        },
+        delivery: true,
+        installment_ledger: true,
         cash_in_hand: {
           orderBy: { created_at: 'desc' },
           take: 1,
@@ -425,7 +427,7 @@ const getBranchCustomers = async (req, res) => {
       const purchaser = order.verification?.purchaser || null;
       const cashInHand = order.cash_in_hand?.[0] || null;
       const delivery = order.delivery;
-      const installmentLedgerModel = delivery?.installment_ledger || null;
+      const installmentLedgerModel = order.installment_ledger || null;
       const profilePhoto = order.verification?.documents?.[0]?.file_url || null;
 
       const customerName = purchaser?.name;
@@ -576,6 +578,7 @@ const submitBranchPayment = async (req, res) => {
       rows[rowIndex].payment_method = payment_method;
       rows[rowIndex].feedback = feedback || 'Branch payment';
       rows[rowIndex].collected_by = officerId;
+      rows[rowIndex].collection_source = 'recovery_officer';
 
       if (totalPaid >= dueAmount) {
         rows[rowIndex].status = 'paid';
@@ -643,7 +646,7 @@ const submitBranchPayment = async (req, res) => {
     const altPhone = (alternate_number && String(alternate_number).trim())
       || order.verification?.purchaser?.alternate_contact
       || order.alternate_contact;
-    const notifyPhones = [phone, altPhone, ...getCompanyNotifyPhones()];
+    const notifyPhones = [phone, altPhone, req.user?.phone, ...getCompanyNotifyPhones()];
 
     if (totalPaid >= dueAmount) {
       sendToMany(notifyPhones, (p) => sendInstallmentPaymentReceipt(p, {
@@ -866,7 +869,7 @@ const generateInstallmentOtp = async (req, res) => {
 
 // API for logging visit ONLY (when payment is NOT collected)
 const logRecoveryVisit = async (req, res) => {
-  const { order_id, latitude, longitude, customer_feedback, visit_notes } = req.body;
+  const { order_id, latitude, longitude, customer_feedback, visit_notes, promised_date } = req.body;
   const officerId = req.user?.id || 24;
 
   // Extract uploaded files
@@ -891,13 +894,17 @@ const logRecoveryVisit = async (req, res) => {
     const order = await prisma.order.findUnique({
       where: { id: parseInt(order_id) },
       include: {
-        verification: { include: { documents: { where: { document_type: 'photo', person_type: 'purchaser' }, orderBy: { uploaded_at: 'desc' }, take: 1 } } }
+        verification: { include: { purchaser: true, documents: { where: { document_type: 'photo', person_type: 'purchaser' }, orderBy: { uploaded_at: 'desc' }, take: 1 } } },
+        installment_ledger: true,
+        cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 }
       }
     });
 
     if (!order) {
       return res.status(404).json({ success: false, message: 'Order not found' });
     }
+
+    const parsedPromisedDate = promised_date ? new Date(promised_date) : null;
 
     // Use transaction for visit and photos
     const result = await prisma.$transaction(async (tx) => {
@@ -912,6 +919,7 @@ const logRecoveryVisit = async (req, res) => {
           visit_notes,
           payment_collected: false,
           amount_collected: null,
+          promised_date: parsedPromisedDate,
           created_at: now()   // ✅ explicit created_at
         }
       });
@@ -958,6 +966,35 @@ const logRecoveryVisit = async (req, res) => {
       return visit;
     });
 
+    // Officer set a Promise to Pay during this (no-payment) visit — notify
+    // customer + alternate + officer + company so the promise is actually
+    // visible to the customer, not just recorded in the app.
+    if (parsedPromisedDate) {
+      const customerName = order.verification?.purchaser?.name || order.customer_name;
+      const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+      const altPhone = order.verification?.purchaser?.alternate_contact || order.alternate_contact;
+      const notifyPhones = [phone, altPhone, req.user?.phone, ...getCompanyNotifyPhones()];
+      const finalProductName = order.cash_in_hand?.[0]?.product_name || order.product_name;
+
+      let amountDue = 0;
+      try {
+        const rawRows = order.installment_ledger?.ledger_rows;
+        if (rawRows) {
+          const normalized = getNormalizedLedger(Array.isArray(rawRows) ? rawRows : JSON.parse(rawRows));
+          const pendingRow = normalized.installment_ledger.find(r => (r.status || '').toLowerCase() !== 'paid');
+          amountDue = pendingRow?.remainingAmount ?? pendingRow?.dueAmount ?? 0;
+        }
+      } catch (e) { /* amountDue stays 0 if ledger can't be parsed */ }
+
+      sendToMany(notifyPhones, (p) => sendPtpConfirmation(p, {
+        customerName,
+        productName: finalProductName,
+        orderRef: order.order_ref,
+        promisedDate: parsedPromisedDate.toLocaleDateString('en-PK'),
+        amountDue,
+      })).catch(err => console.error('Wati PTP Confirmation Error:', err));
+    }
+
     return res.json({ success: true, message: 'Recovery visit logged successfully with photos', visit: result });
   } catch (error) {
     console.error('logRecoveryVisit error:', error);
@@ -968,7 +1005,7 @@ const logRecoveryVisit = async (req, res) => {
 const submitInstallment = async (req, res) => {
   const {
     order_id, month_number, amount, payment_method, feedback, fuelCharges,
-    latitude, longitude, visit_notes, alternate_number
+    latitude, longitude, visit_notes, alternate_number, promised_date
   } = req.body;
   const officerId = req.user?.id;
 
@@ -1024,6 +1061,7 @@ const submitInstallment = async (req, res) => {
 
     const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial;
     const finalProductName = order.cash_in_hand?.[0]?.product_name || order.product_name;
+    const parsedPromisedDate = promised_date ? new Date(promised_date) : null;
 
     // DB Transaction
     await prisma.$transaction(async (tx) => {
@@ -1032,6 +1070,7 @@ const submitInstallment = async (req, res) => {
       rows[rowIndex].payment_method = payment_method;
       rows[rowIndex].feedback = feedback;
       rows[rowIndex].collected_by = officerId;
+      rows[rowIndex].collection_source = 'recovery_officer';
       rows[rowIndex].fuel_charges = parseFloat(fuelCharges || 0);
 
       if (totalPaid >= dueAmount) {
@@ -1095,6 +1134,7 @@ const submitInstallment = async (req, res) => {
           visit_notes: visit_notes,
           payment_collected: true,
           amount_collected: payingNow,
+          promised_date: parsedPromisedDate,
           created_at: now()   // ✅ explicit created_at
         }
       });
@@ -1129,13 +1169,13 @@ const submitInstallment = async (req, res) => {
       }
     });
 
-    // Wati Notifications — customer + alternate number (officer-entered or on file) + company copy
+    // Wati Notifications — customer + alternate number (officer-entered or on file) + the officer + company copy
     const customerName = order.verification?.purchaser?.name || order.customer_name;
     const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
     const altPhone = (alternate_number && String(alternate_number).trim())
       || order.verification?.purchaser?.alternate_contact
       || order.alternate_contact;
-    const notifyPhones = [phone, altPhone, ...getCompanyNotifyPhones()];
+    const notifyPhones = [phone, altPhone, req.user?.phone, ...getCompanyNotifyPhones()];
 
     if (totalPaid >= dueAmount) {
       sendToMany(notifyPhones, (p) => sendInstallmentPaymentReceipt(p, {
@@ -1165,6 +1205,19 @@ const submitInstallment = async (req, res) => {
         dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
         ledgerUrl: ledger.token ? `${ledger.token}` : null
       })).catch(err => console.error('Wati Reminder Error:', err));
+    }
+
+    // Officer set a new Promise to Pay during this visit — send a dedicated
+    // confirmation so the customer actually sees the promised date (the
+    // receipt/reminder templates above don't carry it).
+    if (parsedPromisedDate) {
+      sendToMany(notifyPhones, (p) => sendPtpConfirmation(p, {
+        customerName,
+        productName: finalProductName,
+        orderRef: order.order_ref,
+        promisedDate: parsedPromisedDate.toLocaleDateString('en-PK'),
+        amountDue: Math.max(0, dueAmount - totalPaid),
+      })).catch(err => console.error('Wati PTP Confirmation Error:', err));
     }
 
     // await logAction(...) commented out
@@ -1242,7 +1295,8 @@ const getCustomerFullProfile = async (req, res) => {
             verification_locations: true, // richer, labeled location captures
           },
         },
-        delivery: { include: { installment_ledger: true } },
+        delivery: true,
+        installment_ledger: true,
         paytrigger_devices: true,
       },
     });
@@ -1252,7 +1306,7 @@ const getCustomerFullProfile = async (req, res) => {
     }
 
     const purchaser = order.verification?.purchaser || null;
-    const normalized = getNormalizedLedger(order.delivery?.installment_ledger?.ledger_rows);
+    const normalized = getNormalizedLedger(order.installment_ledger?.ledger_rows);
 
     // ── Timeline: visits (feedback + location + photos) + PTP history ──────
     const visits = await prisma.recoveryVisit.findMany({
@@ -1282,13 +1336,60 @@ const getCustomerFullProfile = async (req, res) => {
           date: entry.date,
           promised_date: entry.promised_date,
           status: entry.status,
-          // ptp_history itself never captured location — if this promise was
-          // set through the app's Visit flow, the matching visit above (same
-          // timestamp) carries the actual location.
-          latitude: null,
-          longitude: null,
+          // Only present for PTPs set after location capture was added —
+          // older entries fall back to null (matching visit, if any, still
+          // carries its own location separately).
+          latitude: entry.latitude ?? null,
+          longitude: entry.longitude ?? null,
         });
       }
+    }
+
+    // ── Payments collected outside a recovery visit (outlet counter, online
+    // SmartPay QR) — these never create a recoveryVisit row, so without this
+    // they'd be invisible here. Recovery-officer payments are skipped since
+    // they already appear above via their matching 'visit' entry. Only rows
+    // tagged with collection_source (added after this fix) are covered —
+    // older untagged rows can't be reliably attributed after the fact.
+    let rawLedgerRows = order.installment_ledger?.ledger_rows;
+    if (typeof rawLedgerRows === 'string') {
+      try { rawLedgerRows = JSON.parse(rawLedgerRows); } catch { rawLedgerRows = []; }
+    }
+    const outsidePaymentRows = (Array.isArray(rawLedgerRows) ? rawLedgerRows : [])
+      .filter(r => parseFloat(r.paid_amount || 0) > 0 && ['outlet', 'online'].includes(r.collection_source));
+
+    const collectorIds = [...new Set(
+      outsidePaymentRows.filter(r => r.collection_source === 'outlet' && r.collected_by != null).map(r => Number(r.collected_by))
+    )];
+    const outletIds = [...new Set(
+      outsidePaymentRows.filter(r => r.collection_source === 'outlet' && r.collected_by_outlet_id != null).map(r => Number(r.collected_by_outlet_id))
+    )];
+    const [collectors, collectorOutlets] = await Promise.all([
+      collectorIds.length > 0
+        ? prisma.user.findMany({ where: { id: { in: collectorIds } }, select: { id: true, full_name: true } })
+        : Promise.resolve([]),
+      outletIds.length > 0
+        ? prisma.outlet.findMany({ where: { id: { in: outletIds } }, select: { id: true, name: true } })
+        : Promise.resolve([]),
+    ]);
+    const collectorNameMap = collectors.reduce((acc, u) => { acc[u.id] = u.full_name; return acc; }, {});
+    const outletNameMap = collectorOutlets.reduce((acc, o) => { acc[o.id] = o.name; return acc; }, {});
+
+    for (const row of outsidePaymentRows) {
+      timeline.push({
+        type: 'payment',
+        date: row.paid_at,
+        source: row.collection_source,
+        amount_collected: parseFloat(row.paid_amount || 0),
+        payment_method: row.payment_method || null,
+        collected_by_name: row.collection_source === 'outlet'
+          ? (collectorNameMap[Number(row.collected_by)] || null)
+          : null,
+        collected_by_outlet_name: row.collection_source === 'outlet'
+          ? (outletNameMap[Number(row.collected_by_outlet_id)] || null)
+          : null,
+        transaction_id: row.transaction_id || null,
+      });
     }
 
     timeline.sort((a, b) => new Date(b.date) - new Date(a.date));
@@ -1309,9 +1410,9 @@ const getCustomerFullProfile = async (req, res) => {
         },
         guarantors: (order.verification?.grantors || []).map(g => ({
           name: g.name,
-          relation: g.relation,
+          relation: g.relationship,
           telephone_number: g.telephone_number,
-          address: g.address,
+          address: g.present_address,
           nearest_location: g.nearest_location,
         })),
         ledger: normalized,
@@ -1606,9 +1707,50 @@ const getRecoveryDashboardStats = async (req, res) => {
         installment_ledger: true,
         verification: {
           include: { purchaser: true }
-        }
+        },
+        delivery: true,
+        cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 }
       }
     });
+
+    const officerOrderIds = activeRecoveryOrders.map(o => o.id);
+    const ptpDevices = await prisma.payTriggerDevice.findMany({
+      where: {
+        order_id: { in: officerOrderIds },
+        ptp_status: { in: ['active', 'broken', 'fulfilled'] }
+      },
+      select: { order_id: true, ptp_status: true }
+    });
+
+    const ptpStats = { active: 0, broken: 0, fulfilled: 0 };
+    for (const d of ptpDevices) {
+      if (ptpStats[d.ptp_status] !== undefined) {
+        ptpStats[d.ptp_status]++;
+      }
+    }
+
+
+    // ── Resolve the ACTUAL delivered product by IMEI, not the suggested
+    // product_name stored on the order at creation time ─────────────────
+    const activeOrdersImeis = activeRecoveryOrders
+      .map(o => o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial)
+      .filter(Boolean);
+
+    const activeOrdersInventories = await prisma.outletInventory.findMany({
+      where: { imei_serial: { in: activeOrdersImeis } },
+      select: { imei_serial: true, product_name: true }
+    });
+
+    const activeOrdersInventoryMap = new Map();
+    for (const inv of activeOrdersInventories) {
+      if (inv.imei_serial) activeOrdersInventoryMap.set(inv.imei_serial, inv);
+    }
+
+    const getDeliveredProductName = (order) => {
+      const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial;
+      const invInfo = imeiSerial ? activeOrdersInventoryMap.get(imeiSerial) : null;
+      return invInfo?.product_name || order.cash_in_hand?.[0]?.product_name || order.product_name || '';
+    };
 
     let todayInstallmentsCount = 0;
     let todayInstallmentsAmount = 0;
@@ -1643,10 +1785,15 @@ const getRecoveryDashboardStats = async (req, res) => {
               orderId: order.id,
               orderRef: order.order_ref || '',
               customerName: order.verification?.purchaser?.name || order.customer_name || '',
-              itemName: order.product_name || '',
+              cnicNumber: order.verification?.purchaser?.cnic_number || null,
+              itemName: getDeliveredProductName(order),
               installmentAmount: row.dueAmount || 0,
               remainingBalance: row.remainingAmount || 0,
-              totalRemaining: normalized.summary?.totalInstallmentRemaining || 0
+              totalRemaining: normalized.summary?.totalInstallmentRemaining || 0,
+              whatsappNumber: order.whatsapp_number || order.verification?.purchaser?.telephone_number || '',
+              address: order.address || order.verification?.purchaser?.present_address || '',
+              city: order.city || '',
+              area: order.area || order.verification?.purchaser?.present_area || ''
             });
           }
         });
@@ -1664,6 +1811,7 @@ const getRecoveryDashboardStats = async (req, res) => {
     const overdueAccounts = [];
     const defaulterAccounts = [];
     const blacklistAccounts = [];
+    const clearedAccounts = [];
 
     try {
       activeRecoveryOrders.forEach(order => {
@@ -1677,7 +1825,8 @@ const getRecoveryDashboardStats = async (req, res) => {
         const installments = normalized.installment_ledger; // already filtered month>0
 
         const customerName = order.verification?.purchaser?.name || order.customer_name || '';
-        const itemName = order.product_name || '';
+        const cnicNumber = order.verification?.purchaser?.cnic_number || null;
+        const itemName = getDeliveredProductName(order);
         const orderRef = order.order_ref || '';
         const orderId = order.id;
 
@@ -1693,7 +1842,7 @@ const getRecoveryDashboardStats = async (req, res) => {
         if (overdueRows.length === 1) {
           const totalOverdue = overdueRows.reduce((s, r) => s + (r.remainingAmount || 0), 0);
           regularAccounts.push({
-            orderId, orderRef, customerName, itemName,
+            orderId, orderRef, customerName, cnicNumber, itemName,
             overdueMonths: overdueRows.length,
             overdueAmount: totalOverdue,
             totalRemaining: normalized.summary.totalInstallmentRemaining
@@ -1701,7 +1850,7 @@ const getRecoveryDashboardStats = async (req, res) => {
         } else if (overdueRows.length >= 2) {
           const totalOverdue = overdueRows.reduce((s, r) => s + (r.remainingAmount || 0), 0);
           overdueAccounts.push({
-            orderId, orderRef, customerName, itemName,
+            orderId, orderRef, customerName, cnicNumber, itemName,
             overdueMonths: overdueRows.length,
             overdueAmount: totalOverdue,
             totalRemaining: normalized.summary.totalInstallmentRemaining
@@ -1719,7 +1868,7 @@ const getRecoveryDashboardStats = async (req, res) => {
           const totalPaidInPeriod = last3Rows.reduce((s, r) => s + (r.paidAmount || 0), 0);
           if (totalPaidInPeriod === 0) {
             defaulterAccounts.push({
-              orderId, orderRef, customerName, itemName,
+              orderId, orderRef, customerName, cnicNumber, itemName,
               missedMonths: last3Rows.length,
               missedAmount: last3Rows.reduce((s, r) => s + (r.dueAmount || 0), 0),
               totalRemaining: normalized.summary.totalInstallmentRemaining
@@ -1735,13 +1884,26 @@ const getRecoveryDashboardStats = async (req, res) => {
           if (totalPaidInPeriod > 0 && totalDueInPeriod > 0 &&
             totalPaidInPeriod < totalDueInPeriod * 0.5) {
             blacklistAccounts.push({
-              orderId, orderRef, customerName, itemName,
+              orderId, orderRef, customerName, cnicNumber, itemName,
               paidInPeriod: totalPaidInPeriod,
               dueInPeriod: totalDueInPeriod,
               coveragePercent: Math.round((totalPaidInPeriod / totalDueInPeriod) * 100),
               totalRemaining: normalized.summary.totalInstallmentRemaining
             });
           }
+        }
+
+        // ── CLEARED: assigned to this officer, fully paid off, 0 balance ──
+        if (normalized.summary.installmentsStarted &&
+          normalized.summary.grandTotalDue > 0 &&
+          normalized.summary.grandTotalRemaining === 0) {
+          clearedAccounts.push({
+            orderId, orderRef, customerName, cnicNumber, itemName,
+            installmentAmount: 0,
+            remainingBalance: 0,
+            totalPaid: normalized.summary.grandTotalPaid,
+            totalRemaining: 0
+          });
         }
       });
     } catch (classifyError) {
@@ -1800,7 +1962,12 @@ const getRecoveryDashboardStats = async (req, res) => {
           count: blacklistAccounts.length,
           accounts: blacklistAccounts
         },
+        cleared: {
+          count: clearedAccounts.length,
+          accounts: clearedAccounts
+        },
         visitStats,
+        ptp: ptpStats,
         targetTracking: {
           achievedAmount,
           targetAmount: monthlyTarget,
@@ -1853,9 +2020,27 @@ const getRecoveryFuelCharges = async (req, res) => {
       },
       include: {
         installment_ledger: true,
-        verification: { include: { purchaser: true } }
+        verification: { include: { purchaser: true } },
+        delivery: true,
+        cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 }
       }
     });
+
+    // ── Resolve the ACTUAL delivered product by IMEI, not the suggested
+    // product_name stored on the order at creation time ─────────────────
+    const fuelOrdersImeis = orders
+      .map(o => o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial)
+      .filter(Boolean);
+
+    const fuelOrdersInventories = await prisma.outletInventory.findMany({
+      where: { imei_serial: { in: fuelOrdersImeis } },
+      select: { imei_serial: true, product_name: true }
+    });
+
+    const fuelOrdersInventoryMap = new Map();
+    for (const inv of fuelOrdersInventories) {
+      if (inv.imei_serial) fuelOrdersInventoryMap.set(inv.imei_serial, inv);
+    }
 
     let totalFuelAmount = 0;
     const entries = [];
@@ -1868,6 +2053,10 @@ const getRecoveryFuelCharges = async (req, res) => {
       if (!Array.isArray(rawRows)) return;
 
       const normalized = getNormalizedLedger(rawRows);
+
+      const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial;
+      const invInfo = imeiSerial ? fuelOrdersInventoryMap.get(imeiSerial) : null;
+      const deliveredProductName = invInfo?.product_name || order.cash_in_hand?.[0]?.product_name || order.product_name || '';
 
       normalized.rows.forEach(row => {
         const fuelAmount = parseFloat(row.fuel_charges || 0);
@@ -1883,7 +2072,8 @@ const getRecoveryFuelCharges = async (req, res) => {
           orderId: order.id,
           orderRef: order.order_ref || '',
           customerName: order.verification?.purchaser?.name || order.customer_name || '',
-          itemName: order.product_name || '',
+          cnicNumber: order.verification?.purchaser?.cnic_number || null,
+          itemName: deliveredProductName,
           monthNumber: row.month ?? 0,
           fuelAmount,
           paymentAmount: parseFloat(row.paid_amount || 0),
@@ -1946,9 +2136,27 @@ const getRecoveryCollectedPayments = async (req, res) => {
       },
       include: {
         installment_ledger: true,
-        verification: { include: { purchaser: true } }
+        verification: { include: { purchaser: true } },
+        delivery: true,
+        cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 }
       }
     });
+
+    // ── Resolve the ACTUAL delivered product by IMEI, not the suggested
+    // product_name stored on the order at creation time ─────────────────
+    const allImeis = orders
+      .map(o => o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial)
+      .filter(Boolean);
+
+    const inventories = await prisma.outletInventory.findMany({
+      where: { imei_serial: { in: allImeis } },
+      select: { imei_serial: true, product_name: true }
+    });
+
+    const inventoryMap = new Map();
+    for (const inv of inventories) {
+      if (inv.imei_serial) inventoryMap.set(inv.imei_serial, inv);
+    }
 
     const isCashMethod = (m) => ['cash', 'recovery_cash', 'recovery cash'].includes((m || '').toLowerCase());
 
@@ -1963,6 +2171,10 @@ const getRecoveryCollectedPayments = async (req, res) => {
 
       const normalized = getNormalizedLedger(rawRows);
 
+      const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial;
+      const invInfo = imeiSerial ? inventoryMap.get(imeiSerial) : null;
+      const deliveredProductName = invInfo?.product_name || order.cash_in_hand?.[0]?.product_name || order.product_name || '';
+
       normalized.rows.forEach(row => {
         const paymentAmount = parseFloat(row.paid_amount || 0);
         if (paymentAmount <= 0) return;
@@ -1975,7 +2187,7 @@ const getRecoveryCollectedPayments = async (req, res) => {
           orderId: order.id,
           orderRef: order.order_ref || '',
           customerName: order.verification?.purchaser?.name || order.customer_name || '',
-          itemName: order.product_name || '',
+          itemName: deliveredProductName,
           monthNumber: row.month ?? 0,
           amount: paymentAmount,
           paymentMethod: row.payment_method || '',
@@ -2138,7 +2350,14 @@ const getRecoveryPtpList = async (req, res) => {
     // Get all active orders for this recovery officer
     const orders = await prisma.order.findMany({
       where: { recovery_officer_id: officerId, is_delivered: true },
-      select: { id: true, order_ref: true, customer_name: true, whatsapp_number: true, city: true, area: true },
+      select: {
+        id: true, order_ref: true, customer_name: true, whatsapp_number: true, city: true, area: true,
+        product_name: true, imei_serial: true,
+        installment_ledger: true,
+        delivery: true,
+        cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 },
+        verification: { select: { purchaser: { select: { name: true, cnic_number: true } } } }
+      },
     });
 
     if (orders.length === 0) {
@@ -2147,6 +2366,28 @@ const getRecoveryPtpList = async (req, res) => {
 
     const orderIds = orders.map(o => o.id);
     const orderMap = new Map(orders.map(o => [o.id, o]));
+
+    // ── Resolve the ACTUAL delivered product by IMEI, not the suggested
+    // product_name stored on the order at creation time ─────────────────
+    const ptpOrdersImeis = orders
+      .map(o => o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial)
+      .filter(Boolean);
+
+    const ptpOrdersInventories = await prisma.outletInventory.findMany({
+      where: { imei_serial: { in: ptpOrdersImeis } },
+      select: { imei_serial: true, product_name: true }
+    });
+
+    const ptpOrdersInventoryMap = new Map();
+    for (const inv of ptpOrdersInventories) {
+      if (inv.imei_serial) ptpOrdersInventoryMap.set(inv.imei_serial, inv);
+    }
+
+    const getDeliveredProductName = (order) => {
+      const imeiSerial = order?.cash_in_hand?.[0]?.imei_serial || order?.delivery?.product_imei || order?.imei_serial;
+      const invInfo = imeiSerial ? ptpOrdersInventoryMap.get(imeiSerial) : null;
+      return invInfo?.product_name || order?.cash_in_hand?.[0]?.product_name || order?.product_name || '';
+    };
 
     // Date range for filter
     let dateWhere = {};
@@ -2168,40 +2409,103 @@ const getRecoveryPtpList = async (req, res) => {
       }
     }
 
-    // Fetch PayTrigger devices for these orders that have a PTP record
-    const devices = await prisma.payTriggerDevice.findMany({
+    // ── Source of truth: RecoveryVisit.promised_date ────────────────────────
+    // A promise is recorded here the moment the officer sets it — whether or
+    // not the order has a PayTrigger-enrolled device. Device enrollment only
+    // adds an optional unlock action on top; it never gates the promise
+    // itself from showing up here.
+    const visits = await prisma.recoveryVisit.findMany({
       where: {
         order_id: { in: orderIds },
-        ptp_status: { not: 'none' },
+        promised_date: { not: null },
         ...dateWhere,
       },
-      orderBy: { promised_date: 'desc' },
+      orderBy: { created_at: 'desc' },
     });
 
-    const summary = { active: 0, fulfilled: 0, broken: 0 };
-    const ptpList = devices.map(device => {
-      const order = orderMap.get(device.order_id);
-      const status = device.ptp_status || 'active';
-      if (summary[status] !== undefined) summary[status]++;
+    // A renewed/extended promise replaces the old one — keep only the most
+    // recently created visit per order so the same order never shows up
+    // twice (once with the stale promise, once with the new one).
+    const latestVisitByOrderId = new Map();
+    for (const visit of visits) {
+      if (!latestVisitByOrderId.has(visit.order_id)) {
+        latestVisitByOrderId.set(visit.order_id, visit);
+      }
+    }
+    const latestVisits = Array.from(latestVisitByOrderId.values());
 
-      return {
-        id: device.id,
-        imei: device.imei,
-        orderId: device.order_id,
-        orderRef: order?.order_ref || device.order_ref || 'N/A',
-        customerName: order?.customer_name || 'Unknown',
+    // Best-effort device lookup per order — purely for showing lock/unlock
+    // context on an entry when one happens to exist; absence of a device
+    // never excludes the promise from this list.
+    const devices = await prisma.payTriggerDevice.findMany({
+      where: { order_id: { in: orderIds } },
+    });
+    const deviceByOrderId = new Map(devices.map(d => [d.order_id, d]));
+
+    // Pulls the next unpaid installment (amount/date) + overall remaining
+    // balance for an order, so the mobile app can sort PTP accounts by them.
+    const getOrderLedgerBrief = (order) => {
+      const empty = { installmentAmount: 0, remainingBalance: 0, totalRemaining: 0, nextInstallmentDate: null };
+      try {
+        let rawRows = order?.installment_ledger?.ledger_rows;
+        if (!rawRows) return empty;
+        if (typeof rawRows === 'string') rawRows = JSON.parse(rawRows);
+        if (!Array.isArray(rawRows)) return empty;
+
+        const normalized = getNormalizedLedger(rawRows);
+        const nextUnpaid = normalized.installment_ledger.find(r => r.status !== 'paid');
+
+        return {
+          installmentAmount: nextUnpaid?.dueAmount || 0,
+          remainingBalance: nextUnpaid?.remainingAmount || 0,
+          totalRemaining: normalized.summary?.totalInstallmentRemaining || 0,
+          nextInstallmentDate: nextUnpaid?.dueDate || null,
+        };
+      } catch (e) {
+        return empty;
+      }
+    };
+
+    const summary = { active: 0, fulfilled: 0, broken: 0 };
+    const nowDt2 = new Date();
+    const ptpList = [];
+    for (const visit of latestVisits) {
+      const order = orderMap.get(visit.order_id);
+      const device = deviceByOrderId.get(visit.order_id) || null;
+      const ledgerBrief = getOrderLedgerBrief(order);
+
+      // Fully paid — the promise no longer applies, so drop it from PTP
+      // entirely instead of leaving it sitting under "Fulfilled".
+      if (ledgerBrief.totalRemaining === 0) continue;
+
+      const status = visit.promised_date < nowDt2 ? 'broken' : 'active';
+      summary[status]++;
+
+      ptpList.push({
+        id: visit.id,
+        imei: device?.imei || order?.imei_serial || '',
+        orderId: visit.order_id,
+        orderRef: order?.order_ref || 'N/A',
+        customerName: order?.verification?.purchaser?.name || order?.customer_name || 'Unknown',
+        cnicNumber: order?.verification?.purchaser?.cnic_number || null,
         whatsappNumber: order?.whatsapp_number || null,
         city: order?.city || null,
         area: order?.area || null,
-        productModel: device.product_model || null,
+        productModel: device?.product_model || null,
+        itemName: getDeliveredProductName(order) || device?.product_model || null,
+        installmentAmount: ledgerBrief.installmentAmount,
+        remainingBalance: ledgerBrief.remainingBalance,
+        totalRemaining: ledgerBrief.totalRemaining,
+        nextInstallmentDate: ledgerBrief.nextInstallmentDate,
         ptpStatus: status,
-        promisedDate: device.promised_date?.toISOString() || null,
-        previousExpiration: device.expiration?.toISOString() || null,
-        history: Array.isArray(device.ptp_history) ? device.ptp_history : [],
-        createdAt: device.created_at?.toISOString() || null,
-        updatedAt: device.updated_at?.toISOString() || null,
-      };
-    });
+        promisedDate: visit.promised_date?.toISOString() || null,
+        previousExpiration: device?.expiration?.toISOString() || null,
+        history: [],
+        createdAt: visit.created_at?.toISOString() || null,
+        updatedAt: visit.created_at?.toISOString() || null,
+        deviceEnrolled: !!device,
+      });
+    }
 
     return res.json({
       success: true,
