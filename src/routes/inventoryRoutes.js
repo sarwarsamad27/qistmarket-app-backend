@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const {
     getInventory,
+    getUsedInventory,
     addInventory,
     initiateStockTransfer,
     verifyStockTransfer,
@@ -19,6 +20,7 @@ const {
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
 router.get('/outlet/inventory', authenticateJWT, getInventory);
+router.get('/outlet/inventory/used', authenticateJWT, getUsedInventory);
 router.post('/outlet/inventory', authenticateJWT, addInventory);
 
 // Stock Transfers

@@ -498,6 +498,7 @@ model OutletInventory {
   installment_plans Json?
   sale_price        Float?          // API recommended sale price (from qistmarket.pk)
   api_product_name  String?         // Matched API product name for future sync
+  is_used           Boolean         @default(false)
   outlet            Outlet          @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
   stockTransfers    StockTransfer[]
 

@@ -811,7 +811,8 @@ const verifyReturnExchangeOtp = async (req, res) => {
                 await prisma.outletInventory.update({
                     where: { id: inventory.id },
                     data: {
-                        status: isUsed ? 'Used Stock' : 'In Stock',
+                        status: 'In Stock', // Item is back in stock
+                        is_used: isUsed,    // Mark as used based on 48h rule
                         updated_at: nowDate   // ✅ explicit updated_at
                     }
                 });

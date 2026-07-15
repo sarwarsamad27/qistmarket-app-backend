@@ -85,7 +85,7 @@ const addMonths = (date, n) => {
 
 // Submit Delivery (Batch Upload)
 const submitDelivery = async (req, res) => {
-  const { order_id, product_imei, selected_plan, phone, feedback } = req.body;
+  const { order_id, product_imei, selected_plan, phone, feedback, enroll_paytrigger } = req.body;
 
   if (!order_id) {
     return res.status(400).json({
@@ -564,6 +564,7 @@ const submitDelivery = async (req, res) => {
     }
 
     // ── PayTrigger: Enroll device only for supported models (non-blocking) ───
+    const enrollPaytrigger = enroll_paytrigger === true || enroll_paytrigger === 'true';
     const paytriggerBrand = pt.detectBrand(productNameSnapshot);
     const refinedProductNameSnapshot = paytriggerBrand;
     const paytriggerDebug = {
@@ -583,7 +584,7 @@ const submitDelivery = async (req, res) => {
 
     console.log('[PayTrigger] submitDelivery debug:', paytriggerDebug);
 
-    if (pt.ENABLED() && updatedDelivery.product_imei && order && paytriggerBrand && pt.isEligible(refinedProductNameSnapshot, inventoryCategory)) {
+    if (enrollPaytrigger && pt.ENABLED() && updatedDelivery.product_imei && order && paytriggerBrand && pt.isEligible(refinedProductNameSnapshot, inventoryCategory)) {
       const expiration = firstInstallmentDueDate;
       console.log('[PayTrigger] calling preEnrollImei with:', {
         imei: updatedDelivery.product_imei,
@@ -1924,7 +1925,7 @@ const getDeliveryOfficerOTPLogs = async (req, res) => {
  * Handles Self Pickup delivery directly from the branch
  */
 const submitSelfPickupDelivery = async (req, res) => {
-  const { order_id, product_imei, selected_plan, phone, feedback } = req.body;
+  const { order_id, product_imei, selected_plan, phone, feedback, enroll_paytrigger } = req.body;
   const outlet_id = req.user.outlet_id;
 
   if (!outlet_id) {
@@ -2301,7 +2302,8 @@ const submitSelfPickupDelivery = async (req, res) => {
     );
 
     // ── PayTrigger: Enroll device only for supported models (non-blocking) ───
-    if (pt.ENABLED() && delivery.product_imei && pt.isEligible(order.product_name, inventoryCategory)) {
+    const enrollPaytrigger = enroll_paytrigger === true || enroll_paytrigger === 'true';
+    if (enrollPaytrigger && pt.ENABLED() && delivery.product_imei && pt.isEligible(order.product_name, inventoryCategory)) {
       const expiration = firstInstallmentDueDate || new Date(new Date().setMonth(new Date().getMonth() + 1));
       pt.preEnrollImei(
         delivery.product_imei,
