@@ -1749,8 +1749,33 @@ const getMyDeliveryOrdersWithPagination = async (req, res) => {
           },
         },
         delivery: true,
+        cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 },
       },
     });
+
+    // ── Resolve the ACTUAL delivered product by IMEI, not the suggested
+    // product_name stored on the order at creation time ─────────────────
+    const deliveryImeis = orders
+      .map(o => o.delivery?.product_imei || o.cash_in_hand?.[0]?.imei_serial || o.imei_serial)
+      .filter(Boolean);
+
+    const deliveryInventories = deliveryImeis.length > 0
+      ? await prisma.outletInventory.findMany({
+          where: { imei_serial: { in: deliveryImeis } },
+          select: { imei_serial: true, product_name: true }
+        })
+      : [];
+
+    const deliveryInventoryMap = new Map();
+    for (const inv of deliveryInventories) {
+      if (inv.imei_serial) deliveryInventoryMap.set(inv.imei_serial, inv);
+    }
+
+    const getDeliveredProductName = (order) => {
+      const imeiSerial = order.delivery?.product_imei || order.cash_in_hand?.[0]?.imei_serial || order.imei_serial;
+      const invInfo = imeiSerial ? deliveryInventoryMap.get(imeiSerial) : null;
+      return invInfo?.product_name || order.cash_in_hand?.[0]?.product_name || order.product_name || null;
+    };
 
     // Map orders to explicitly include timestamp fields and parse JSON in delivery
     const formattedOrders = orders.map(order => {
@@ -1769,6 +1794,13 @@ const getMyDeliveryOrdersWithPagination = async (req, res) => {
             parsedDelivery = order.delivery;
           }
         }
+      }
+
+      if (parsedDelivery) {
+        parsedDelivery = {
+          ...parsedDelivery,
+          product_name: getDeliveredProductName(order),
+        };
       }
 
       return {
