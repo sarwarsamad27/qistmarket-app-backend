@@ -5,7 +5,7 @@ const sendEmail = require('../utils/sendEmail');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { sendOTP } = require('../services/watiService');
 const { getOTPEmailTemplate } = require('../utils/emailTemplates');
-const { logAction } = require('../utils/auditLogger');
+const { logAction, logLoginAction } = require('../utils/auditLogger');
 
 const { generateConsumerNumber, generateSmartPayConsumerNumber } = require('../utils/consumerNumberUtils');
 
@@ -299,6 +299,7 @@ const verifyLoginOTP = async (req, res) => {
     };
 
     const token = jwt.sign(payload, jwtSecret);
+    await logLoginAction(req, user, 'success');
 
     return res.json({ success: true, message: 'Login successful.', token, user: payload });
   } catch (error) {
@@ -356,19 +357,7 @@ const verifyWebLoginOTP = async (req, res) => {
     };
 
     const token = jwt.sign(payload, jwtSecret);
-
-    // Manual log since req.user is not yet set in middleware
-    // await prisma.securityLog.create({
-    //     data: {
-    //         outlet_id: user.outlet_id || 0,
-    //         user_id: user.id,
-    //         user_name: user.full_name,
-    //         action: 'USER_LOGIN',
-    //         details: `User logged into dashboard from ${req.ip || 'unknown IP'}`,
-    //         target_id: user.id,
-    //         target_type: 'User'
-    //     }
-    // });
+    await logLoginAction(req, user, 'success');
 
     return res.json({ success: true, message: 'Login successful.', token, user: payload });
   } catch (error) {

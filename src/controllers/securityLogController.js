@@ -1,19 +1,30 @@
 const prisma = require('../../lib/prisma');
+const { getOutletFilter } = require('../utils/outletFilter');
 
 const getSecurityLogs = async (req, res) => {
     try {
-        const outletId = req.user.outlet_id;
-        const { action, startDate, endDate, page = 1, limit = 20 } = req.query;
+        const { action, userId, search, startDate, endDate, page = 1, limit = 20 } = req.query;
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
         const take = parseInt(limit);
 
         const where = {
-            outlet_id: outletId
+            ...getOutletFilter(req)
         };
 
         if (action) {
             where.action = action;
+        }
+
+        if (userId) {
+            where.user_id = parseInt(userId);
+        }
+
+        if (search) {
+            where.OR = [
+                { details: { contains: search } },
+                { user_name: { contains: search } },
+            ];
         }
 
         if (startDate || endDate) {
@@ -33,6 +44,12 @@ const getSecurityLogs = async (req, res) => {
                         username: true,
                         full_name: true,
                         image: true
+                    }
+                },
+                outlet: {
+                    select: {
+                        name: true,
+                        code: true
                     }
                 }
             }

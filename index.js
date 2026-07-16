@@ -15,6 +15,7 @@ const jwt = require('jsonwebtoken');
 
 const paytriggerRoutes = require('./src/routes/paytriggerRoutes');
 const hrRoutes = require('./src/routes/hrRoutes');
+const accountsRoutes = require('./src/routes/accountsRoutes');
 const employeePortalRoutes = require('./src/routes/employeePortalRoutes');
 const smartPayWebhookRoutes = require('./src/routes/smartPayWebhookRoutes');
 const ledgerRoutes = require('./src/routes/ledgerRoutes');
@@ -139,7 +140,7 @@ io.on('connection', (socket) => {
     if (!token) return;
     try {
       const decoded = jwt.verify(token, JWT_SECRET);
-      if ([4, 6, 7, 9].includes(decoded.role_id)) {
+      if ([4, 6, 7, 9, 11].includes(decoded.role_id)) { // Admin, Stock Manager, Super Admin, Form Analyzer, Accountant
         socket.join('admins');
         socket.emit('joined_admin_room', { success: true, userId: decoded.id });
         console.log(`Admin ${decoded.id} joined admins room`);
@@ -450,6 +451,7 @@ app.get('/', (req, res) => {
 // ────────────────────────────────────────────────
 app.use('/api', paytriggerRoutes);
 app.use('/api/hr', hrRoutes);
+app.use('/api/accounts', accountsRoutes);
 app.use('/api', employeePortalRoutes);
 app.use('/api/smartpay/webhook', smartPayWebhookRoutes);
 app.use('/ledger', ledgerRoutes);
@@ -663,6 +665,18 @@ server.listen(PORT, () => {
     }, { timezone: 'Asia/Karachi' });
 
     console.log('[MidnightCron] Midnight cron job scheduled (Asia/Karachi).');
+
+    // Scheduled Accounts reports: checked hourly, each config only actually
+    // sends once its own daily/weekly/monthly window has elapsed.
+    const { runScheduledReports } = require('./src/services/scheduledReportService');
+    cron.schedule('0 * * * *', async () => {
+      try {
+        await runScheduledReports();
+      } catch (err) {
+        console.error('[ScheduledReports] Cron run failed:', err);
+      }
+    }, { timezone: 'Asia/Karachi' });
+    console.log('[ScheduledReports] Hourly scheduled-report check registered (Asia/Karachi).');
   } else {
     console.warn('[MidnightCron] node-cron not available; midnight safety-net disabled.');
   }

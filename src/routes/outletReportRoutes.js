@@ -8,6 +8,7 @@ const {
     getProfitLoss,
     getCustomerLedger,
     getRecoveryReport,
+    getAllOutlets,
     getFinancialReport,
     getInstallmentRecoveriesReport,
     getOfficerRecoveryReport
@@ -51,6 +52,12 @@ router.get('/outlet-reports/customer-ledger/:phone', getCustomerLedger);
  * @desc    Get recovery/pending payments report
  */
 router.get('/outlet-reports/recovery', getRecoveryReport);
+
+/**
+ * @route   GET /api/outlet-reports/all-outlets
+ * @desc    Simple outlet list helper for admin/outlet-selector dropdowns
+ */
+router.get('/outlet-reports/all-outlets', getAllOutlets);
 
 /**
  * @route   GET /api/outlet-reports/financials

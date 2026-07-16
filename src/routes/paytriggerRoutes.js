@@ -10,6 +10,7 @@ const {
   promiseToPay,
   handleCallback,
   listDevices,
+  getDeviceSummary,
   syncAllDevices,
   getDeviceTagRemote,
   unenrollDevice,
@@ -47,6 +48,7 @@ router.post('/paytrigger/device/:imei/find/status', authenticateJWT, findPhoneSt
 router.post('/paytrigger/device/:imei/simlock-reset', authenticateJWT, resetDeviceSimLock);
 
 router.get('/paytrigger/devices', authenticateJWT, listDevices);
+router.get('/paytrigger/devices/summary', authenticateJWT, getDeviceSummary);
 router.post('/paytrigger/sync-all', authenticateJWT, syncAllDevices);
 
 // Global Company Routes

@@ -11,6 +11,7 @@ const {
   ensureUniqueUsername,
 } = require('../utils/employeeUtils');
 const { sendOTP } = require('../services/watiService');
+const { logLoginAction } = require('../utils/auditLogger');
 
 const now = () => new Date();
 
@@ -738,6 +739,7 @@ const hrLogin = async (req, res) => {
 
     const isMatch = await bcrypt.compare(password, user.password_hash || '');
     if (!isMatch) {
+      await logLoginAction(req, user, 'failed', 'Incorrect password.');
       return res.status(401).json({ success: false, message: 'Invalid credentials.' });
     }
 
@@ -753,6 +755,7 @@ const hrLogin = async (req, res) => {
     };
 
     const token = jwt.sign(payload, jwtSecret);
+    await logLoginAction(req, user, 'success');
 
     return res.json({ success: true, message: 'HR login successful.', token, user: payload });
   } catch (error) {

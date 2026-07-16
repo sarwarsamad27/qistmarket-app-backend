@@ -343,7 +343,7 @@ async function handleCallback(req, res) {
 
 async function listDevices(req, res) {
   try {
-    const { page = 1, limit = 20, search = '', status = '', lock_status = '' } = req.query;
+    const { page = 1, limit = 20, search = '', status = '', lock_status = '', ptp_status = '', promisedFrom = '', promisedTo = '', outletId = '' } = req.query;
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const where = {};
     if (search) {
@@ -355,6 +355,13 @@ async function listDevices(req, res) {
     }
     if (status) where.enrollment_status = status;
     if (lock_status) where.lock_status = lock_status;
+    if (ptp_status) where.ptp_status = ptp_status;
+    if (promisedFrom || promisedTo) {
+      where.promised_date = {};
+      if (promisedFrom) where.promised_date.gte = new Date(promisedFrom);
+      if (promisedTo) where.promised_date.lte = new Date(promisedTo);
+    }
+    if (outletId && outletId !== 'all') where.order = { outlet_id: parseInt(outletId) };
 
     const [devices, total] = await Promise.all([
       prisma.payTriggerDevice.findMany({
@@ -386,6 +393,47 @@ async function listDevices(req, res) {
     });
   } catch (error) {
     console.error('[PayTrigger] listDevices error:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+}
+
+/**
+ * getDeviceSummary
+ * Company-wide device counts for the Accounts PayTrigger dashboard tile:
+ * locked, unlocked-with-unpaid-balance, and PTP status breakdown.
+ */
+async function getDeviceSummary(req, res) {
+  try {
+    const devices = await prisma.payTriggerDevice.findMany({
+      select: {
+        lock_status: true,
+        ptp_status: true,
+        order: { select: { installment_ledger: { select: { ledger_rows: true } } } },
+      },
+    });
+
+    let locked = 0;
+    let unlockedUnpaid = 0;
+    const ptpCounts = { active: 0, fulfilled: 0, broken: 0, none: 0 };
+
+    for (const device of devices) {
+      if (device.lock_status === 'locked') locked += 1;
+
+      if (device.lock_status !== 'locked') {
+        const { summary } = getNormalizedLedger(device.order?.installment_ledger?.ledger_rows);
+        if (summary.grandTotalRemaining > 0) unlockedUnpaid += 1;
+      }
+
+      const ptp = device.ptp_status || 'none';
+      ptpCounts[ptp] = (ptpCounts[ptp] || 0) + 1;
+    }
+
+    return res.json({
+      success: true,
+      data: { totalDevices: devices.length, locked, unlockedUnpaid, ptp: ptpCounts },
+    });
+  } catch (error) {
+    console.error('[PayTrigger] getDeviceSummary error:', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 }
@@ -750,6 +798,7 @@ module.exports = {
   promiseToPay,
   handleCallback,
   listDevices,
+  getDeviceSummary,
   syncAllDevices,
   checkOverdueDevices,
   getDeviceTagRemote,

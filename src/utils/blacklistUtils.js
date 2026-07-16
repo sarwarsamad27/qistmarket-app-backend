@@ -29,9 +29,23 @@ async function syncBlacklistStatus() {
             }
         });
 
+        // Manually whitelisted CNICs (most recent action = 'whitelist') are protected
+        // from being re-blacklisted by this automatic sync.
+        const overrideActions = await prisma.blacklistAction.findMany({ orderBy: { created_at: 'desc' } });
+        const latestActionByCnic = {};
+        for (const o of overrideActions) {
+            if (!(o.cnic in latestActionByCnic)) latestActionByCnic[o.cnic] = o.action;
+        }
+        const whitelistedCnics = new Set(
+            Object.entries(latestActionByCnic).filter(([, action]) => action === 'whitelist').map(([cnic]) => cnic)
+        );
+
         const blacklistedVerificationIds = [];
 
         for (const order of orders) {
+            const purchaserCnic = order.verification?.purchaser?.cnic_number;
+            if (purchaserCnic && whitelistedCnics.has(purchaserCnic)) continue;
+
             const ledgerModel = order.delivery?.installment_ledger;
             if (!ledgerModel || !ledgerModel.ledger_rows) continue;
 

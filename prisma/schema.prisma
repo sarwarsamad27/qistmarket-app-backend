@@ -88,6 +88,16 @@ model User {
   officer_transactions           OfficerTransaction[]      @relation("OfficerTransactions")
   consumer_numbers               ConsumerNumber[]          @relation("UserConsumerNumbers")
   device_login_requests          DeviceLoginRequest[]
+  bank_accounts_created          BankAccount[]             @relation("BankAccountCreator")
+  bank_transactions_created      BankTransaction[]         @relation("BankTransactionCreator")
+  blacklist_actions_created      BlacklistAction[]         @relation("BlacklistActionCreator")
+  monthly_targets_created        MonthlyTarget[]           @relation("MonthlyTargetCreator")
+  cash_limits_created            CashLimit[]               @relation("CashLimitCreator")
+  bank_statements_uploaded       BankStatement[]           @relation("BankStatementUploader")
+  vendor_cash_transactions_created VendorCashTransaction[] @relation("VendorCashTransactionCreator")
+  scheduled_payments_created     ScheduledPayment[]        @relation("ScheduledPaymentCreator")
+  scheduled_reports_created      ScheduledReportConfig[]   @relation("ScheduledReportCreator")
+  expense_vouchers_approved      ExpenseVoucher[]          @relation("ExpenseApprover")
 
   @@index([role_id])
   @@index([is_online])
@@ -262,6 +272,7 @@ model Outlet {
   name             String
   address          String?
   status           String            @default("active")
+  type             String            @default("outlet") // "outlet" | "warehouse"
   created_at       DateTime          @default(now())
   updated_at       DateTime          @updatedAt
   orders           Order[]
@@ -278,8 +289,167 @@ model Outlet {
   vendors          Vendor[]
   auto_assignment_config Json?
   employees        Employee[]
+  bank_accounts    BankAccount[]
 
   @@map("outlets")
+}
+
+model BankAccount {
+  id               Int               @id @default(autoincrement())
+  bank_name        String
+  account_title    String
+  account_number   String            @unique
+  iban             String?
+  branch_code      String?
+  outlet_id        Int?
+  outlet           Outlet?           @relation(fields: [outlet_id], references: [id])
+  opening_balance  Float             @default(0)
+  current_balance  Float             @default(0)
+  is_active        Boolean           @default(true)
+  notes            String?
+  created_by_id    Int?
+  created_by       User?             @relation("BankAccountCreator", fields: [created_by_id], references: [id])
+  transactions     BankTransaction[]
+  statements       BankStatement[]
+  created_at       DateTime          @default(now())
+  updated_at       DateTime          @updatedAt
+
+  @@index([outlet_id])
+  @@map("bank_accounts")
+}
+
+model BankTransaction {
+  id               Int            @id @default(autoincrement())
+  bank_account_id  Int
+  bank_account     BankAccount    @relation(fields: [bank_account_id], references: [id])
+  type             String         // "credit" | "debit"
+  amount           Float
+  balance_after    Float
+  description      String?
+  reference        String?
+  transaction_date DateTime       @default(now())
+  reconciled       Boolean        @default(false)
+  statement_id     Int?
+  statement        BankStatement? @relation(fields: [statement_id], references: [id])
+  transfer_group   String?        // shared ref linking the paired debit+credit of an inter-bank transfer
+  created_by_id    Int?
+  created_by       User?          @relation("BankTransactionCreator", fields: [created_by_id], references: [id])
+  created_at       DateTime       @default(now())
+
+  @@index([bank_account_id])
+  @@index([statement_id])
+  @@index([transfer_group])
+  @@map("bank_transactions")
+}
+
+model BankStatement {
+  id              Int               @id @default(autoincrement())
+  bank_account_id Int
+  bank_account    BankAccount       @relation(fields: [bank_account_id], references: [id])
+  file_url        String
+  period_start    DateTime?
+  period_end      DateTime?
+  uploaded_by_id  Int?
+  uploaded_by     User?             @relation("BankStatementUploader", fields: [uploaded_by_id], references: [id])
+  transactions    BankTransaction[]
+  created_at      DateTime          @default(now())
+
+  @@index([bank_account_id])
+  @@map("bank_statements")
+}
+
+model MonthlyTarget {
+  id            Int      @id @default(autoincrement())
+  month         String   @unique // "YYYY-MM"
+  target_amount Float
+  created_by_id Int?
+  created_by    User?    @relation("MonthlyTargetCreator", fields: [created_by_id], references: [id])
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+
+  @@map("monthly_targets")
+}
+
+model BlacklistAction {
+  id            Int      @id @default(autoincrement())
+  cnic          String
+  action        String   // "blacklist" | "whitelist"
+  category      String?  // "fraud" | "non_payment" | "other" — structured tagging
+  reason        String?
+  status        String   @default("approved") // blacklist = immediate "approved"; whitelist starts "pending" until approved
+  approved_by_id Int?
+  approved_at   DateTime?
+  created_by_id Int?
+  created_by    User?    @relation("BlacklistActionCreator", fields: [created_by_id], references: [id])
+  created_at    DateTime @default(now())
+
+  @@index([cnic])
+  @@index([status])
+  @@map("blacklist_actions")
+}
+
+model CashLimit {
+  id            Int      @id @default(autoincrement())
+  scope_type    String   // "outlet" | "officer"
+  scope_id      Int      // outlet_id or user_id depending on scope_type
+  daily_limit   Float
+  created_by_id Int?
+  created_by    User?    @relation("CashLimitCreator", fields: [created_by_id], references: [id])
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+
+  @@unique([scope_type, scope_id])
+  @@map("cash_limits")
+}
+
+model VendorCashTransaction {
+  id            Int      @id @default(autoincrement())
+  vendor_id     Int
+  vendor        Vendor   @relation(fields: [vendor_id], references: [id])
+  type          String   // "credit" | "debit"
+  amount        Float
+  balance_after Float
+  description   String?
+  created_by_id Int?
+  created_by    User?    @relation("VendorCashTransactionCreator", fields: [created_by_id], references: [id])
+  created_at    DateTime @default(now())
+
+  @@index([vendor_id])
+  @@map("vendor_cash_transactions")
+}
+
+model ScheduledPayment {
+  id             Int      @id @default(autoincrement())
+  vendor_id      Int
+  vendor         Vendor   @relation(fields: [vendor_id], references: [id])
+  amount         Float
+  scheduled_date DateTime
+  status         String   @default("scheduled") // scheduled | paid | cancelled
+  notes          String?
+  created_by_id  Int?
+  created_by     User?    @relation("ScheduledPaymentCreator", fields: [created_by_id], references: [id])
+  created_at     DateTime @default(now())
+  updated_at     DateTime @updatedAt
+
+  @@index([vendor_id])
+  @@index([status])
+  @@index([scheduled_date])
+  @@map("scheduled_payments")
+}
+
+model ScheduledReportConfig {
+  id            Int       @id @default(autoincrement())
+  report_type   String    // "daybook" | "expenses" | "vendor_payables" | "recovery" | "aging"
+  frequency     String    // "daily" | "weekly" | "monthly"
+  recipients    String    @db.Text // comma-separated emails
+  is_active     Boolean   @default(true)
+  last_sent_at  DateTime?
+  created_by_id Int?
+  created_by    User?     @relation("ScheduledReportCreator", fields: [created_by_id], references: [id])
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @updatedAt
+
+  @@map("scheduled_report_configs")
 }
 
 model CashRegister {
@@ -306,20 +476,26 @@ model CashRegister {
 
 model ExpenseVoucher {
   id             Int           @id @default(autoincrement())
-  outlet_id      Int
+  outlet_id      Int?
   voucher_number String        @unique
   total_amount   Float         @default(0)
   payment_method String        @default("Cash")
   date           DateTime      @default(now())
   notes          String?       @db.Text
+  status         String        @default("approved") // pending | approved | rejected
+  approved_by_id Int?
+  approved_at    DateTime?
+  invoice_url    String?
   created_at     DateTime      @default(now())
   updated_at     DateTime      @updatedAt
   items          ExpenseItem[]
-  outlet         Outlet        @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
+  outlet         Outlet?       @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
+  approved_by    User?         @relation("ExpenseApprover", fields: [approved_by_id], references: [id])
 
   @@index([outlet_id])
   @@index([date])
   @@index([voucher_number])
+  @@index([status])
   @@map("expense_vouchers")
 }
 
@@ -336,19 +512,22 @@ model ExpenseItem {
 }
 
 model Vendor {
-  id         Int              @id @default(autoincrement())
-  outlet_id  Int
-  name       String
-  phone      String?
-  email      String?
-  address    String?
-  balance    Float            @default(0)
-  created_at DateTime         @default(now())
-  updated_at DateTime         @updatedAt
-  payments   VendorPayment[]
-  purchases  VendorPurchase[]
-  returns    VendorPurchaseReturn[]
-  outlet     Outlet           @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
+  id                   Int                     @id @default(autoincrement())
+  outlet_id            Int?
+  name                 String
+  phone                String?
+  email                String?
+  address              String?
+  balance              Float                   @default(0)
+  cash_in_hand_balance Float                   @default(0)
+  created_at           DateTime                @default(now())
+  updated_at           DateTime                @updatedAt
+  payments             VendorPayment[]
+  purchases            VendorPurchase[]
+  returns              VendorPurchaseReturn[]
+  outlet               Outlet?                 @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
+  cash_transactions    VendorCashTransaction[]
+  scheduled_payments   ScheduledPayment[]
 
   @@index([outlet_id])
   @@index([name])
@@ -1093,20 +1272,23 @@ model RecoveryVisitPhoto {
 
 model SecurityLog {
   id          Int      @id @default(autoincrement())
-  outlet_id   Int
+  outlet_id   Int?
   user_id     Int
   user_name   String
   action      String
   details     String   @db.Text
   target_id   Int?
   target_type String?
+  ip_address  String?
+  device_info String?  @db.Text
   created_at  DateTime @default(now())
-  outlet      Outlet   @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
+  outlet      Outlet?  @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
   user        User     @relation(fields: [user_id], references: [id])
 
   @@index([outlet_id])
   @@index([user_id])
   @@index([created_at])
+  @@index([action])
   @@map("security_logs")
 }
 

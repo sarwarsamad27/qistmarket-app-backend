@@ -9,6 +9,7 @@ const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
 const pt = require('../services/paytriggerService');
 const { notifyUser } = require('../utils/notificationUtils');
+const { logLoginAction } = require('../utils/auditLogger');
 
 const now = () => new Date();
 
@@ -118,6 +119,7 @@ const loginOutletUser = async (req, res) => {
 
         const isMatch = await bcrypt.compare(password, user.password_hash || "");
         if (!isMatch && user.username !== password) { // Added fallback for plain text if any
+            await logLoginAction(req, user, 'failed', 'Incorrect password.');
             return res.status(401).json({ success: false, message: 'Invalid credentials.' });
         }
 
@@ -134,6 +136,7 @@ const loginOutletUser = async (req, res) => {
         };
 
         const token = jwt.sign(payload, jwtConfig.jwtSecret);
+        await logLoginAction(req, user, 'success');
 
         res.json({ success: true, token, user: payload });
     } catch (error) {
