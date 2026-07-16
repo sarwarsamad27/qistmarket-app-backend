@@ -59,7 +59,7 @@ async function seed() {
         }
 
         // 3. Clean up previously seeded test data to allow idempotency
-        const testUsernames = ['rec_dummy1', 'rec_dummy2', 'rec_dummy3', 'rec_dummy4'];
+        const testUsernames = ['rec_dummy1', 'rec_dummy2', 'rec_dummy3', 'rec_dummy4', 'outlet_dummy1'];
         const testMobiles = [];
         const testOrderRefs = [];
         for (let idx = 100; idx <= 150; idx++) {
@@ -247,6 +247,8 @@ async function seed() {
             }
         });
 
+        // Clean up Branch User login credentials (web login uses username/password, no OTP table needed)
+
         // 4. Create Dummy Outlet if not exists
         const dummyOutletCode = 'QTD-999';
         let dummyOutlet = await prisma.outlet.findUnique({
@@ -265,42 +267,59 @@ async function seed() {
         }
         console.log(`Outlet 'Test Dummy Outlet' is available with ID ${dummyOutlet.id}`);
 
-        // 5. Create Dummy Recovery Officers
+        // 5a. Create Dummy Branch User (Outlet Manager) for Test Dummy Outlet
+        const branchUser = await prisma.user.create({
+            data: {
+                full_name: 'Test Dummy Outlet Manager',
+                username: 'outlet_dummy1',
+                password_hash: passwordHash,
+                phone: '03001234570',
+                email: 'outletdummy1@test.com',
+                role_id: 5, // Branch User
+                outlet_id: dummyOutlet.id,
+                status: 'active',
+                created_at: new Date(),
+                updated_at: new Date()
+            }
+        });
+        console.log(`Created Branch User: ${branchUser.full_name} (${branchUser.username}) for outlet ID ${dummyOutlet.id}`);
+
+        // 5b. Create Dummy Recovery Officers
         const dummyOfficers = [
             {
-                full_name: 'Test Recovery Officer Sadar',
+                full_name: 'Test Recovery Officer 1',
                 username: 'rec_dummy1',
                 phone: '03001234561',
                 email: 'recdummy1@test.com',
                 role_id: recRoleId,
-                outlet_id: 1, // Sadar
+                outlet_id: dummyOutlet.id, // Test Dummy Outlet
                 status: 'active'
             },
             {
-                full_name: 'Test Recovery Officer Gulshan',
+                full_name: 'Test Recovery Officer 2',
                 username: 'rec_dummy2',
                 phone: '03001234562',
                 email: 'recdummy2@test.com',
                 role_id: recRoleId,
-                outlet_id: 3, // Gulshan
+                outlet_id: dummyOutlet.id, // Test Dummy Outlet
                 status: 'active'
             },
             {
-                full_name: 'Test Recovery Officer Korangi',
+                full_name: 'Test Recovery Officer 3',
                 username: 'rec_dummy3',
                 phone: '03001234563',
                 email: 'recdummy3@test.com',
                 role_id: recRoleId,
-                outlet_id: 5, // Korangi
+                outlet_id: dummyOutlet.id, // Test Dummy Outlet
                 status: 'active'
             },
             {
-                full_name: 'Test Recovery Officer Outlet',
+                full_name: 'Test Recovery Officer 4',
                 username: 'rec_dummy4',
                 phone: '03001234564',
                 email: 'recdummy4@test.com',
                 role_id: recRoleId,
-                outlet_id: dummyOutlet.id, // Test Dummy Outlet!
+                outlet_id: dummyOutlet.id, // Test Dummy Outlet
                 status: 'active'
             }
         ];
