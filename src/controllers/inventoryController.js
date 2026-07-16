@@ -67,7 +67,7 @@ function generateInstallments(categoryName, price) {
     const category = categoryName.toLowerCase().trim();
     let plans = [];
 
-    if (category === 'mobiles' && price <= 50000) {
+    if (category === 'mobiles' && price <= 60000) {
         plans = [
             { months: 3, profit: 0.20, advance: 0.35 },
             { months: 6, profit: 0.35, advance: 0.25 },
@@ -99,6 +99,7 @@ function generateInstallments(categoryName, price) {
             { months: 6, profit: 0.38, advance: 0.35 },
             { months: 9, profit: 0.48, advance: 0.30 },
             { months: 12, profit: 0.60, advance: 0.25 },
+            { months: 24, profit: 0.85, advance: 0.25 },
         ];
     } else {
         return [];
@@ -123,6 +124,102 @@ function generateInstallments(categoryName, price) {
 }
 
 const getInventory = async (req, res) => {
+    const { outlet_id } = req.user;
+    const { page = 1, limit = 20, search = "" } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const take = parseInt(limit);
+
+    if (!outlet_id) {
+        return res.status(403).json({ success: false, message: 'Not an outlet user.' });
+    }
+
+    try {
+        // 1. Get unique product names that match search criteria
+        // Exclude 'Pending Transfer' items — they are tracked in transfer history, not inventory list
+        const productSearchWhere = {
+            outlet_id,
+            is_used: false,
+            status: { not: 'Used Stock' }, 
+            OR: search ? [
+                { product_name: { contains: search } },
+                { imei_serial: { contains: search } },
+                { category: { contains: search } }
+            ] : undefined
+        };
+
+        // Get distinct product names for pagination
+        const distinctProducts = await prisma.outletInventory.findMany({
+            where: productSearchWhere,
+            distinct: ['product_name'],
+            select: { product_name: true },
+            orderBy: { product_name: 'asc' },
+            skip,
+            take
+        });
+
+        const totalProductsCount = await prisma.outletInventory.groupBy({
+            by: ['product_name'],
+            where: productSearchWhere,
+            _count: true
+        });
+        const total = totalProductsCount.length;
+
+        const productNames = distinctProducts.map(p => p.product_name);
+
+        // 2. Fetch all records for these product names (excluding Pending Transfer)
+        const inventory = await prisma.outletInventory.findMany({
+            where: {
+                outlet_id,
+                status: { not: 'Used Stock' },
+                is_used: false,
+                product_name: { in: productNames }
+            },
+            orderBy: [{ product_name: 'asc' }, { id: 'asc' }]
+        });
+
+        // 3. Calculate Global Stats (Count unique product names)
+        const [totalUniqueProducts, inStockUnique, soldUnique] = await Promise.all([
+            prisma.outletInventory.groupBy({
+                by: ['product_name'],
+                where: { outlet_id, is_used: false,
+                status: { not: 'Used Stock' }
+                },
+                _count: true
+            }),
+            prisma.outletInventory.groupBy({
+                by: ['product_name'],
+                where: { outlet_id, is_used: false, status: 'In Stock' },
+                _count: true
+            }),
+            prisma.outletInventory.groupBy({
+                by: ['product_name'],
+                where: { outlet_id, is_used: false, status: 'Sold' },
+                _count: true
+            })
+        ]);
+
+        res.json({
+            success: true,
+            inventory, // Frontend will group these by product_name
+            stats: {
+                totalStock: totalUniqueProducts.length || 0,
+                inStock: inStockUnique.length || 0,
+                sold: soldUnique.length || 0
+            },
+            pagination: {
+                total, // total unique products
+                page: parseInt(page),
+                limit: parseInt(limit),
+                totalPages: Math.ceil(total / parseInt(limit))
+            }
+        });
+    } catch (error) {
+        console.error('getInventory error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const getStockTransferInventory = async (req, res) => {
     const { outlet_id } = req.user;
     const { page = 1, limit = 20, search = "" } = req.query;
     const skip = (parseInt(page) - 1) * parseInt(limit);
@@ -181,7 +278,7 @@ const getInventory = async (req, res) => {
             }),
             prisma.outletInventory.groupBy({
                 by: ['product_name'],
-                where: { outlet_id, status: { in: ['In Stock', 'Used Stock'] } },
+                where: { outlet_id, status: 'In Stock' },
                 _count: true
             }),
             prisma.outletInventory.groupBy({
@@ -208,6 +305,94 @@ const getInventory = async (req, res) => {
         });
     } catch (error) {
         console.error('getInventory error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+
+const getUsedInventory = async (req, res) => {
+    const { outlet_id } = req.user;
+    const { page = 1, limit = 20, search = "" } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const take = parseInt(limit);
+
+    if (!outlet_id) {
+        return res.status(403).json({ success: false, message: 'Not an outlet user.' });
+    }
+
+    try {
+        const productSearchWhere = {
+            outlet_id,
+            is_used: true,
+            OR: search ? [
+                { product_name: { contains: search } },
+                { imei_serial: { contains: search } },
+                { category: { contains: search } }
+            ] : undefined
+        };
+
+        const distinctProducts = await prisma.outletInventory.findMany({
+            where: productSearchWhere,
+            distinct: ['product_name'],
+            select: { product_name: true },
+            orderBy: { product_name: 'asc' },
+            skip,
+            take
+        });
+
+        const totalProductsCount = await prisma.outletInventory.groupBy({
+            by: ['product_name'],
+            where: productSearchWhere,
+            _count: true
+        });
+        const total = totalProductsCount.length;
+
+        const productNames = distinctProducts.map(p => p.product_name);
+
+        const inventory = await prisma.outletInventory.findMany({
+            where: {
+                outlet_id,
+                is_used: true,
+                product_name: { in: productNames }
+            },
+            orderBy: [{ product_name: 'asc' }, { id: 'asc' }]
+        });
+
+        const [totalUniqueProducts, inStockUnique, soldUnique] = await Promise.all([
+            prisma.outletInventory.groupBy({
+                by: ['product_name'],
+                where: { outlet_id, is_used: true },
+                _count: true
+            }),
+            prisma.outletInventory.groupBy({
+                by: ['product_name'],
+                where: { outlet_id, is_used: true, status: { in: ['In Stock', 'Used Stock'] } },
+                _count: true
+            }),
+            prisma.outletInventory.groupBy({
+                by: ['product_name'],
+                where: { outlet_id, is_used: true, status: 'Sold' },
+                _count: true
+            })
+        ]);
+
+        res.json({
+            success: true,
+            inventory,
+            stats: {
+                totalStock: totalUniqueProducts.length || 0,
+                inStock: inStockUnique.length || 0,
+                sold: soldUnique.length || 0
+            },
+            pagination: {
+                total,
+                page: parseInt(page),
+                limit: parseInt(limit),
+                totalPages: Math.ceil(total / parseInt(limit))
+            }
+        });
+    } catch (error) {
+        console.error('getUsedInventory error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
     }
 };
@@ -1128,7 +1313,10 @@ const initiateStockBack = async (req, res) => {
             if (t.to_id !== backGiverId || t.to_type !== backGiverType) {
                 return res.status(400).json({ success: false, message: 'All selected transfers must belong to the same recipient.' });
             }
-            if (t.status !== 'transferred' && t.status !== 'pending' && t.status !== 'delivered') {
+            if (t.status === 'delivered') {
+                return res.status(400).json({ success: false, message: 'Cannot back stock for delivered items.' });
+            }
+            if (t.status !== 'transferred' && t.status !== 'pending') {
                 return res.status(400).json({ success: false, message: `Cannot back stock in ${t.status} status.` });
             }
         }
@@ -1449,6 +1637,8 @@ const syncProductPlans = async (req, res) => {
 
 module.exports = {
     getInventory,
+    getStockTransferInventory,
+    getUsedInventory,
     addInventory,
     initiateStockTransfer,
     verifyStockTransfer,

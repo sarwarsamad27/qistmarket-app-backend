@@ -728,13 +728,23 @@ const verifyReturnExchangeOtp = async (req, res) => {
         if (record.status === 'verified') return res.status(400).json({ success: false, error: 'Already verified' });
         if (record.otp !== otp) return res.status(400).json({ success: false, error: 'Invalid OTP' });
 
-        // Step 2: Time calculation for Used Stock logic (48 hours)
-        const deliveryTime = record.order.delivery?.end_time || record.order.delivery?.updated_at || record.order.updated_at;
+        // Step 2: Enforce 48-hour return window for Return requests
+        const deliveryTime = record.order.delivery?.end_time;
         const nowDate = now();
-        const hoursSinceDelivery = (nowDate.getTime() - new Date(deliveryTime).getTime()) / (1000 * 60 * 60);
+        const deliveryDate = new Date(deliveryTime);
+        const hasValidDeliveryTime = deliveryTime && !isNaN(deliveryDate.getTime());
+        const hoursSinceDelivery = hasValidDeliveryTime
+            ? (nowDate.getTime() - deliveryDate.getTime()) / (1000 * 60 * 60)
+            : Number.POSITIVE_INFINITY;
 
-        // If type is Return and > 48h, mark as Used
-        const isUsed = record.type === 'Return' && hoursSinceDelivery > 48;
+        if (record.type === 'Return' && hoursSinceDelivery > 48) {
+            return res.status(400).json({
+                success: false,
+                error: 'Item cannot be returned because it has been held for more than 48 hours.'
+            });
+        }
+
+        const isUsed = record.type === 'Return' && hoursSinceDelivery < 48;
 
         // Step 3: Mark return record as verified
         const updatedRecord = await prisma.returnExchange.update({
@@ -814,25 +824,26 @@ const verifyReturnExchangeOtp = async (req, res) => {
                 await prisma.outletInventory.update({
                     where: { id: inventory.id },
                     data: {
-                        status: isUsed ? 'Used Stock' : 'In Stock',
+                        status: 'In Stock', // Item is back in stock
+                        is_used: isUsed,    // Mark as used based on 48h rule
                         updated_at: nowDate   // ✅ explicit updated_at
                     }
                 });
 
                 // Step 8: Create stock transfer record with explicit timestamps
-                await prisma.stockTransfer.create({
-                    data: {
-                        inventory_id: inventory.id,
-                        from_type: 'Customer',
-                        from_id: record.order_id,
-                        to_type: 'Outlet',
-                        to_id: parseInt(outlet_id),
-                        status: 'completed',
-                        quantity_transferred: 1,
-                        created_at: nowDate,   // ✅ explicit created_at
-                        updated_at: nowDate    // ✅ explicit updated_at
-                    }
-                });
+                // await prisma.stockTransfer.create({
+                //     data: {
+                //         inventory_id: inventory.id,
+                //         from_type: 'Customer',
+                //         from_id: record.order_id,
+                //         to_type: 'Outlet',
+                //         to_id: parseInt(outlet_id),
+                //         status: 'completed',
+                //         quantity_transferred: 1,
+                //         created_at: nowDate,   // ✅ explicit created_at
+                //         updated_at: nowDate    // ✅ explicit updated_at
+                //     }
+                // });
             }
         }
 

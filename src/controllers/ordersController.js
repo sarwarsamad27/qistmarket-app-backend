@@ -3296,6 +3296,7 @@ const getSelfPickupInventory = async (req, res) => {
         purchase_price: true,
         installment_plans: true,
         status: true,
+        is_used: true
       },
       orderBy: { product_name: 'asc' },
     });
