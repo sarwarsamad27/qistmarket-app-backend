@@ -198,7 +198,7 @@ const submitDelivery = async (req, res) => {
             inventory_id: inventory.id,
             to_id: req.user.id,
             to_type: 'Delivery Officer',
-            status: 'pending'
+            status: 'transferred'
           }
         });
 
@@ -1607,7 +1607,7 @@ const getDeliveryBoyInventory = async (req, res) => {
       where: {
         to_type: 'Delivery Officer',
         to_id: deliveryBoyId,
-        status: { in: ['transferred', 'delivered'] }
+        status: { in: ['transferred'] }
       },
       include: {
         inventory: {
@@ -1628,6 +1628,8 @@ const getDeliveryBoyInventory = async (req, res) => {
       },
       orderBy: { created_at: 'desc' }
     });
+
+    console.log('Fetched transfers:', transfers);
 
     const outletIds = [...new Set(transfers.filter(t => t.from_type === 'Outlet').map(t => t.from_id))];
     const outlets = outletIds.length > 0
@@ -2303,32 +2305,108 @@ const submitSelfPickupDelivery = async (req, res) => {
 
     // ── PayTrigger: Enroll device only for supported models (non-blocking) ───
     const enrollPaytrigger = enroll_paytrigger === true || enroll_paytrigger === 'true';
-    if (enrollPaytrigger && pt.ENABLED() && delivery.product_imei && pt.isEligible(order.product_name, inventoryCategory)) {
-      const expiration = firstInstallmentDueDate || new Date(new Date().setMonth(new Date().getMonth() + 1));
+    const paytriggerBrand = pt.detectBrand(productNameSnapshot);
+    const refinedProductNameSnapshot = paytriggerBrand;
+    const paytriggerDebug = {
+      enabled: pt.ENABLED(),
+      hasImei: Boolean(updatedDelivery.product_imei),
+      hasOrder: Boolean(order),
+      orderId: order?.id,
+      orderRef: order?.order_ref,
+      productName: refinedProductNameSnapshot,
+      paytriggerBrand,
+      inventoryCategory,
+      eligible: Boolean(refinedProductNameSnapshot && pt.isEligible(refinedProductNameSnapshot, inventoryCategory)),
+      firstInstallmentDueDate: firstInstallmentDueDate,
+      deliveryId: updatedDelivery.id,
+      imei: updatedDelivery.product_imei,
+    };
+
+    console.log('[PayTrigger] submitDelivery debug:', paytriggerDebug);
+
+    if (enrollPaytrigger && pt.ENABLED() && updatedDelivery.product_imei && order && paytriggerBrand && pt.isEligible(refinedProductNameSnapshot, inventoryCategory)) {
+      const expiration = firstInstallmentDueDate;
+      console.log('[PayTrigger] calling preEnrollImei with:', {
+        imei: updatedDelivery.product_imei,
+        orderRef: order.order_ref,
+        productName: refinedProductNameSnapshot,
+        detectedBrand: paytriggerBrand,
+        expiration,
+      });
+
       pt.preEnrollImei(
-        delivery.product_imei,
+        updatedDelivery.product_imei,
         order.order_ref,
-        order.product_name,
+        productNameSnapshot,
         expiration
       ).then(async (result) => {
-        if (result?.code === 200) {
-          await prisma.payTriggerDevice.create({
-            data: {
-              imei: delivery.product_imei,
+        console.log('[PayTrigger] preEnrollImei result:', result);
+        if (result?.code === 200 || result?.code === 50015) {
+          let deviceTag = null;
+          let serverState = 500;
+          let enrollmentStatus = 'pre_enrolled';
+
+          if (result?.code === 50015) {
+            try {
+              const dRes = await pt.getDeviceTag(updatedDelivery.product_imei);
+              if (dRes?.code === 200 && dRes.data) {
+                deviceTag = dRes.data.deviceTag || null;
+                serverState = dRes.data.serverState || 500;
+                const stateMap = { 500: 'pre_enrolled', 1000: 'registered', 2000: 'ready_to_activate', 3000: 'active', 4000: 'locked', 5000: 'removable' };
+                enrollmentStatus = stateMap[serverState] || 'pre_enrolled';
+              }
+            } catch (err) {
+              console.error('[PayTrigger] Failed to recover device tag:', err.message);
+            }
+          }
+
+          await prisma.payTriggerDevice.upsert({
+            where: { imei: updatedDelivery.product_imei },
+            update: {
               order_id: order.id,
               order_ref: order.order_ref,
-              delivery_id: delivery.id,
-              product_model: order.product_name,
-              enrollment_status: 'pre_enrolled',
-              server_state: 500,
+              delivery_id: updatedDelivery.id,
+              product_model: productNameSnapshot,
+              device_tag: deviceTag,
+              server_state: serverState,
+              enrollment_status: enrollmentStatus,
               expiration,
               last_sync_at: new Date(),
               raw_state: result,
             },
-          }).catch(e => console.error('[PayTrigger] create device failed:', e.message));
+            create: {
+              imei: updatedDelivery.product_imei,
+              order_id: order.id,
+              order_ref: order.order_ref,
+              delivery_id: updatedDelivery.id,
+              product_model: productNameSnapshot,
+              device_tag: deviceTag,
+              enrollment_status: enrollmentStatus,
+              server_state: serverState,
+              expiration,
+              last_sync_at: new Date(),
+              raw_state: result,
+            },
+          }).catch(e => console.error('[PayTrigger] create/update device failed:', e.message));
+        } else {
+          console.warn('[PayTrigger] pre-enroll returned non-200:', {
+            code: result?.code,
+            message: result?.message,
+            result,
+          });
         }
       }).catch(e => console.error('[PayTrigger] pre-enroll failed:', e.message));
+    } else {
+      console.warn('[PayTrigger] block skipped because condition failed:', {
+        enabled: pt.ENABLED(),
+        hasImei: Boolean(updatedDelivery.product_imei),
+        hasOrder: Boolean(order),
+        productName: productNameSnapshot,
+        inventoryCategory,
+        eligible: Boolean(productNameSnapshot && pt.isEligible(productNameSnapshot, inventoryCategory)),
+      });
     }
+
 
     return res.status(201).json({
       success: true,
