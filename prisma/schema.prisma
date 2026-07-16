@@ -687,7 +687,6 @@ model OutletInventory {
   @@index([outlet_id])
   @@index([status])
   @@index([api_product_name])
-  @@index([barcode])
   @@map("outlet_inventories")
 }
 
