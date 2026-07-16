@@ -194,7 +194,7 @@ const verifyLoginOTP = async (req, res) => {
 
     const user = await prisma.user.findFirst({
       where: whereCondition,
-      include: { role: true }
+      include: { role: true, outlet: true }
     });
 
     if (!user) {
@@ -294,6 +294,7 @@ const verifyLoginOTP = async (req, res) => {
       role_id: user.role_id,
       role: user.role.name,
       outlet_id: user.outlet_id,
+      outlet_name: user.outlet ? user.outlet.name : null,
       permissions: user.permissions_json ? user.permissions_json : null,
       sid: sessionToken
     };
