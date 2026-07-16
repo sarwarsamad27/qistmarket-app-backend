@@ -863,11 +863,11 @@ const deleteInventoryItem = async (req, res) => {
     const { id } = req.params;
 
     try {
-        const deleted = await prisma.outletInventory.deleteMany({
-            where: { id: parseInt(id), outlet_id }
-        });
+        const item = await prisma.outletInventory.findFirst({ where: { id: parseInt(id), outlet_id } });
+        if (!item) return res.status(404).json({ success: false, message: 'Item not found' });
 
-        if (deleted.count === 0) return res.status(404).json({ success: false, message: 'Item not found' });
+        await prisma.outletInventory.delete({ where: { id: item.id } });
+        await logAction(req, 'INVENTORY_DELETED', `Deleted inventory item: ${item.product_name}${item.imei_serial ? ` (IMEI ${item.imei_serial})` : ''}.`, item.id, 'OutletInventory');
 
         res.json({ success: true, message: 'Item deleted successfully' });
     } catch (error) {
@@ -920,6 +920,7 @@ const bulkDeleteInventory = async (req, res) => {
         const deleted = await prisma.outletInventory.deleteMany({
             where: { id: { in: ids.map(id => parseInt(id)) }, outlet_id }
         });
+        await logAction(req, 'INVENTORY_BULK_DELETED', `Bulk deleted ${deleted.count} inventory item(s).`, null, 'OutletInventory');
 
         res.json({ success: true, count: deleted.count, message: 'Items deleted successfully' });
     } catch (error) {

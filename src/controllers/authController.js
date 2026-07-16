@@ -344,6 +344,17 @@ const verifyWebLoginOTP = async (req, res) => {
       return res.status(403).json({ success: false, error: { code: 403, message: 'Account is not active.' } });
     }
 
+    if (user.is_2fa_enabled) {
+      const { totp_code } = req.body;
+      if (!totp_code) {
+        return res.json({ success: false, requires2FA: true, message: 'Enter your 2FA code to continue.' });
+      }
+      const speakeasy = require('speakeasy');
+      if (!speakeasy.totp.verify({ secret: user.totp_secret, encoding: 'base32', token: totp_code, window: 1 })) {
+        return res.status(401).json({ success: false, error: { code: 401, message: 'Invalid 2FA code.' } });
+      }
+    }
+
     const payload = {
       id: user.id,
       full_name: user.full_name,
@@ -823,6 +834,7 @@ const deleteUser = async (req, res) => {
     }
 
     await prisma.user.delete({ where: { id: parseInt(userId) } });
+    await logAction(req, 'USER_DELETED', `Deleted user ${user.full_name} (@${user.username}, role_id ${user.role_id}).`, user.id, 'User');
 
     return res.json({ success: true, message: 'User deleted successfully.' });
   } catch (error) {

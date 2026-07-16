@@ -27,11 +27,12 @@ const {
 } = require('../controllers/outletController');
 const { generateSmartPayQr, checkSmartPayQr } = require('../controllers/smartPayController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
+const { requirePermission } = require('../middlewares/permissionMiddleware');
 
-router.post('/outlets', authenticateJWT, createOutlet);
+router.post('/outlets', authenticateJWT, requirePermission('manage_outlets'), createOutlet);
 router.get('/outlets', authenticateJWT, getOutlets);
 router.get('/all-outlets', authenticateJWT, getAllOutlets);
-router.patch('/outlets/:id', authenticateJWT, updateOutlet);
+router.patch('/outlets/:id', authenticateJWT, requirePermission('manage_outlets'), updateOutlet);
 router.post('/outlet/login', loginOutletUser);
 router.get('/outlet/dashboard-stats', authenticateJWT, getDashboardStats);
 

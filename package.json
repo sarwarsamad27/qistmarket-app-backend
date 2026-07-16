@@ -39,7 +39,8 @@
     "pg": "^8.16.3",
     "puppeteer": "^24.40.0",
     "qrcode": "^1.5.4",
-    "socket.io": "^4.8.3"
+    "socket.io": "^4.8.3",
+    "speakeasy": "^2.0.0"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",

@@ -1,0 +1,127 @@
+{
+  "roles": [
+    {
+      "id": 1,
+      "name": "Verification Officer",
+      "permissions_json": null
+    },
+    {
+      "id": 2,
+      "name": "Delivery Agent",
+      "permissions_json": null
+    },
+    {
+      "id": 3,
+      "name": "Recovery Officer",
+      "permissions_json": null
+    },
+    {
+      "id": 4,
+      "name": "Admin",
+      "permissions_json": null
+    },
+    {
+      "id": 5,
+      "name": "Branch User",
+      "permissions_json": null
+    },
+    {
+      "id": 6,
+      "name": "Stock Manager",
+      "permissions_json": null
+    },
+    {
+      "id": 7,
+      "name": "Super Admin",
+      "permissions_json": null
+    },
+    {
+      "id": 8,
+      "name": "Sales Officer",
+      "permissions_json": null
+    },
+    {
+      "id": 9,
+      "name": "Form Analyzer",
+      "permissions_json": null
+    },
+    {
+      "id": 10,
+      "name": "HR",
+      "permissions_json": null
+    },
+    {
+      "id": 11,
+      "name": "Accountant",
+      "permissions_json": null
+    }
+  ],
+  "outlets": [
+    {
+      "id": 1,
+      "code": "QIST-001",
+      "name": "Outlet Sadar"
+    },
+    {
+      "id": 2,
+      "code": "MS-001",
+      "name": "MOBILE"
+    },
+    {
+      "id": 3,
+      "code": "QIST-003",
+      "name": "Gulshan"
+    },
+    {
+      "id": 4,
+      "code": "QIST-004",
+      "name": "Test"
+    },
+    {
+      "id": 5,
+      "code": "QMK-001",
+      "name": "KORANGI BRANCH"
+    },
+    {
+      "id": 6,
+      "code": "ST-001",
+      "name": "Test Suhail"
+    },
+    {
+      "id": 7,
+      "code": "QIST-002",
+      "name": "Outlet Elipse"
+    },
+    {
+      "id": 8,
+      "code": "QIST-005",
+      "name": "Elipse Outlet Two"
+    }
+  ],
+  "recoveryOfficers": [
+    {
+      "id": 24,
+      "username": "sarwarrec",
+      "full_name": "sarwar rec",
+      "role": {
+        "name": "Recovery Officer"
+      }
+    },
+    {
+      "id": 25,
+      "username": "ahadrec",
+      "full_name": "ahad rec",
+      "role": {
+        "name": "Recovery Officer"
+      }
+    },
+    {
+      "id": 35,
+      "username": "taimoor123",
+      "full_name": "TAIMOOR KHAN",
+      "role": {
+        "name": "Recovery Officer"
+      }
+    }
+  ]
+}

@@ -126,8 +126,92 @@ const notifyOutlet = async (outletId, title, message, type, relatedId = null, io
     }
 };
 
+/**
+ * Notify every active user with a given role name (e.g. "Recovery Officer").
+ */
+const notifyRole = async (roleName, title, message, type, relatedId = null, io = null) => {
+    try {
+        const users = await prisma.user.findMany({
+            where: { role: { name: roleName }, status: 'active' },
+            select: { id: true },
+        });
+
+        if (users.length === 0) return;
+
+        const notificationData = users.map((user) => ({
+            userId: user.id,
+            title,
+            message,
+            type,
+            relatedId: relatedId ? parseInt(relatedId) : null,
+            createdAt: now(),
+            updatedAt: now(),
+        }));
+
+        await prisma.notification.createMany({ data: notificationData });
+
+        if (io) {
+            for (const user of users) {
+                io.to(`user_${user.id}`).emit('new_notification', {
+                    id: Date.now() + user.id,
+                    title,
+                    message,
+                    type,
+                    relatedId,
+                    isRead: false,
+                    createdAt: now(),
+                    updatedAt: now(),
+                });
+            }
+        }
+    } catch (err) {
+        console.error(`Failed to notify role ${roleName}:`, err);
+    }
+};
+
+/**
+ * Notify every active user in the system.
+ */
+const notifyAll = async (title, message, type, relatedId = null, io = null) => {
+    try {
+        const users = await prisma.user.findMany({ where: { status: 'active' }, select: { id: true } });
+        if (users.length === 0) return;
+
+        const notificationData = users.map((user) => ({
+            userId: user.id,
+            title,
+            message,
+            type,
+            relatedId: relatedId ? parseInt(relatedId) : null,
+            createdAt: now(),
+            updatedAt: now(),
+        }));
+
+        await prisma.notification.createMany({ data: notificationData });
+
+        if (io) {
+            for (const user of users) {
+                io.to(`user_${user.id}`).emit('new_notification', {
+                    id: Date.now() + user.id,
+                    title,
+                    message,
+                    type,
+                    relatedId,
+                    isRead: false,
+                    createdAt: now(),
+                    updatedAt: now(),
+                });
+            }
+        }
+    } catch (err) {
+        console.error('Failed to notify all users:', err);
+    }
+};
+
 module.exports = {
     notifyAdmins,
     notifyUser,
-    notifyOutlet
+    notifyOutlet,
+    notifyRole,
+    notifyAll,
 };

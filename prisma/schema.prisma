@@ -44,6 +44,8 @@ model User {
   fcm_token                      String?                   @db.VarChar(255)
   reset_token_expires            DateTime?
   reset_token_hash               String?
+  totp_secret                    String?
+  is_2fa_enabled                 Boolean                   @default(false)
   bike_km_range                  Int?
   is_online                      Boolean                   @default(false)
   last_known_latitude            Float?
@@ -56,6 +58,7 @@ model User {
   outlet_id                      Int?
   officer_profile_history        Json?
   current_active_verification_id Int?                      @unique
+  badges                         Badge[]
   deliveries                     Delivery[]                @relation("delivery_agent")
   officerAssignments             OfficerAreaAssignment[]   @relation("OfficerAssignments")
   officerSessions                OfficerSession[]
@@ -677,12 +680,14 @@ model OutletInventory {
   installment_plans Json?
   sale_price        Float?          // API recommended sale price (from qistmarket.pk)
   api_product_name  String?         // Matched API product name for future sync
+  barcode           String?
   outlet            Outlet          @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
   stockTransfers    StockTransfer[]
 
   @@index([outlet_id])
   @@index([status])
   @@index([api_product_name])
+  @@index([barcode])
   @@map("outlet_inventories")
 }
 
@@ -1334,6 +1339,40 @@ model Customer {
   orders           Order[]
 
   @@map("customers")
+}
+
+model DiscountRequest {
+  id             Int       @id @default(autoincrement())
+  order_id       Int
+  requested_by   Int
+  amount         Float
+  reason         String    @db.Text
+  status         String    @default("pending") // "pending" | "approved" | "rejected"
+  decided_by     Int?
+  decided_at     DateTime?
+  decision_notes String?   @db.Text
+  created_at     DateTime  @default(now())
+
+  @@index([order_id])
+  @@index([status])
+  @@map("discount_requests")
+}
+
+model Badge {
+  id         Int      @id @default(autoincrement())
+  user_id    Int
+  badge_type String   // e.g. "champion", "top_performer"
+  department String   // "csr" | "verification" | "delivery" | "recovery"
+  period     String   // "month"
+  month      Int
+  year       Int
+  awarded_at DateTime @default(now())
+
+  user User @relation(fields: [user_id], references: [id])
+
+  @@unique([user_id, department, period, month, year])
+  @@index([user_id])
+  @@map("badges")
 }
 
 model CsrRanking {

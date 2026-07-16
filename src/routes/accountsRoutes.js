@@ -31,6 +31,7 @@ const {
   createInterBankTransfer,
 } = require('../controllers/bankAccountController');
 const upload = require('../middlewares/uploadMiddleware');
+const { requirePermission } = require('../middlewares/permissionMiddleware');
 const { getBlacklistedCustomers } = require('../controllers/customerController');
 const {
   searchByCnicOrPhone,
@@ -74,12 +75,20 @@ const {
 const {
   getLoginHistory,
   getFraudAlerts,
+  getDuplicateCnicAlerts,
+  getLowRecoveryAlerts,
 } = require('../controllers/accountsAuditController');
 const {
   getWarehouseStockSummary,
   getStockTransfersOverview,
   getReturnItemsReport,
   searchByImei,
+  getInventoryHealthAlerts,
+  getDamagedStockReport,
+  markItemDamaged,
+  getProductMovementReport,
+  getProductPricingComparison,
+  searchByBarcode,
 } = require('../controllers/accountsStockController');
 const {
   exportReportCsv,
@@ -169,12 +178,21 @@ router.get('/receivables/risk-analysis', getReceivablesRiskAnalysis);
 // Audit: login history + fraud monitoring
 router.get('/audit/login-history', getLoginHistory);
 router.get('/audit/fraud-alerts', getFraudAlerts);
+router.get('/audit/duplicate-cnic', getDuplicateCnicAlerts);
+router.get('/audit/low-recovery', getLowRecoveryAlerts);
 
-// Stock: warehouse, transfers, returns, IMEI search
+// Stock: warehouse, transfers, returns, IMEI/barcode search, health alerts,
+// damaged stock, product movement, pricing comparison
 router.get('/stock/warehouse', getWarehouseStockSummary);
 router.get('/stock/transfers', getStockTransfersOverview);
 router.get('/stock/returns', getReturnItemsReport);
 router.get('/stock/imei/:imei', searchByImei);
+router.get('/stock/barcode/:barcode', searchByBarcode);
+router.get('/stock/health-alerts', getInventoryHealthAlerts);
+router.get('/stock/damaged', getDamagedStockReport);
+router.patch('/stock/:id/mark-damaged', requirePermission('manage_inventory'), markItemDamaged);
+router.get('/stock/movement', getProductMovementReport);
+router.get('/stock/pricing-comparison', getProductPricingComparison);
 
 // Reporting: CSV export + scheduled report config
 router.get('/reports/export/:reportType', exportReportCsv);

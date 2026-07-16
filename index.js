@@ -16,6 +16,10 @@ const jwt = require('jsonwebtoken');
 const paytriggerRoutes = require('./src/routes/paytriggerRoutes');
 const hrRoutes = require('./src/routes/hrRoutes');
 const accountsRoutes = require('./src/routes/accountsRoutes');
+const adminPanelRoutes = require('./src/routes/adminPanelRoutes');
+const installmentRoutes = require('./src/routes/installmentRoutes');
+const twoFactorRoutes = require('./src/routes/twoFactorRoutes');
+const discountRoutes = require('./src/routes/discountRoutes');
 const employeePortalRoutes = require('./src/routes/employeePortalRoutes');
 const smartPayWebhookRoutes = require('./src/routes/smartPayWebhookRoutes');
 const ledgerRoutes = require('./src/routes/ledgerRoutes');
@@ -452,6 +456,10 @@ app.get('/', (req, res) => {
 app.use('/api', paytriggerRoutes);
 app.use('/api/hr', hrRoutes);
 app.use('/api/accounts', accountsRoutes);
+app.use('/api/admin-panel', adminPanelRoutes);
+app.use('/api/installments', installmentRoutes);
+app.use('/api/2fa', twoFactorRoutes);
+app.use('/api/discounts', discountRoutes);
 app.use('/api', employeePortalRoutes);
 app.use('/api/smartpay/webhook', smartPayWebhookRoutes);
 app.use('/ledger', ledgerRoutes);
@@ -677,6 +685,19 @@ server.listen(PORT, () => {
       }
     }, { timezone: 'Asia/Karachi' });
     console.log('[ScheduledReports] Hourly scheduled-report check registered (Asia/Karachi).');
+
+    // Automation rules: daily digest at 09:00 Asia/Karachi for overdue
+    // installments and low-stock — at most one notification per condition
+    // per day, not per-event.
+    const { runAutomationRules } = require('./src/services/automationRulesService');
+    cron.schedule('0 9 * * *', async () => {
+      try {
+        await runAutomationRules(io);
+      } catch (err) {
+        console.error('[AutomationRules] Cron run failed:', err);
+      }
+    }, { timezone: 'Asia/Karachi' });
+    console.log('[AutomationRules] Daily automation-rules digest registered (09:00 Asia/Karachi).');
   } else {
     console.warn('[MidnightCron] node-cron not available; midnight safety-net disabled.');
   }

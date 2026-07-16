@@ -36,6 +36,18 @@ const accountantLogin = async (req, res) => {
       return res.status(401).json({ success: false, message: 'Invalid credentials.' });
     }
 
+    if (user.is_2fa_enabled) {
+      const { totp_code } = req.body;
+      if (!totp_code) {
+        return res.json({ success: false, requires2FA: true, message: 'Enter your 2FA code to continue.' });
+      }
+      const speakeasy = require('speakeasy');
+      if (!speakeasy.totp.verify({ secret: user.totp_secret, encoding: 'base32', token: totp_code, window: 1 })) {
+        await logLoginAction(req, user, 'failed', 'Invalid 2FA code.');
+        return res.status(401).json({ success: false, message: 'Invalid 2FA code.' });
+      }
+    }
+
     const payload = {
       id: user.id,
       full_name: user.full_name,
