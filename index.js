@@ -68,6 +68,7 @@ const io = new Server(server, {
   cors: {
     origin: [
       "http://localhost:3000",
+      "http://localhost:2000",
       "http://localhost:5173",           // Vite default
       "http://127.0.0.1:3000",
       "https://qistmarket-app-dashboard.onrender.com",   // ← change to real domain
